@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+.env.*
+
+# Tool caches
+.ruff_cache/
+.basedpyright/
+.pytest_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local agent/browser state
+.pi/
+.playwright/
+
+# Data and generated media
+data/
+*.mp4
+
+# OS/editor
+.DS_Store
