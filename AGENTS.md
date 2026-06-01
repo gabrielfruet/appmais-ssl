@@ -8,3 +8,7 @@
   - `uv run ruff format . --check`
   - `uv run ruff check .`
   - `uv run basedpyright`
+
+## Git
+
+You should do regular commits with meaningful, but concise, commit messages.
