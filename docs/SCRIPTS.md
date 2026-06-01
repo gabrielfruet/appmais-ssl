@@ -29,4 +29,4 @@ Resume files are stored in the output directory:
 - `download_manifest.jsonl` records each attempted video as `downloaded`, `unavailable`, or `failed`.
 - Partially downloaded files use `.part` and are only renamed to `.mp4` after success.
 
-Use `--hives`, `--start-date`, and `--end-date` to restrict the sample.
+Use `--hives`, `--start-date`, and `--end-date` to restrict the sample. The script waits between AppMAIS requests by default; use `--delay SECONDS` and `--max-retries N` if the server returns rate-limit errors.

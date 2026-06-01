@@ -4,7 +4,9 @@ import argparse
 import datetime as dt
 import json
 import random
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
@@ -27,6 +29,8 @@ class Args(argparse.Namespace):
     hives: list[str] | None
     start_date: dt.date | None
     end_date: dt.date | None
+    delay: float
+    max_retries: int
 
 
 class ManifestRecord(TypedDict):
@@ -81,7 +85,11 @@ def main() -> None:
                 continue
 
             try:
-                times = client.list_times(hive, day)
+                times = request_with_retries(
+                    f"list times for {hive} {day}",
+                    args,
+                    lambda hive=hive, day=day: client.list_times(hive, day),
+                )
             except Exception as exc:
                 print(f"  failed to list times: {exc}")
                 save_state(state_path, signature, day_index + 1)
@@ -96,7 +104,7 @@ def main() -> None:
                 if status in {"downloaded", "unavailable"} or key in attempted_this_run:
                     continue
 
-                result = try_download_video(client, args.output, hive, day, time)
+                result = try_download_video(client, args, hive, day, time)
                 attempted_this_run.add(key)
                 append_manifest(manifest_path, result)
                 statuses[key] = result["status"]
@@ -161,6 +169,18 @@ def parse_args() -> Args:
         default=None,
         help="Optional last day, YYYY-MM-DD.",
     )
+    parser.add_argument(
+        "--delay",
+        type=non_negative_float,
+        default=2.0,
+        help="Seconds to wait before each AppMAIS request.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=non_negative_int,
+        default=5,
+        help="Retries for HTTP 429 rate-limit responses.",
+    )
     return cast(Args, parser.parse_args())
 
 
@@ -171,17 +191,37 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or positive")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or positive")
+    return parsed
+
+
 def parse_optional_date(value: str) -> dt.date:
     return parse_date(value)
 
 
 def build_day_schedule(client: AppMaisClient, args: Args) -> list[tuple[str, str]]:
-    hives = args.hives if args.hives is not None else client.list_hives()
+    hives = (
+        args.hives
+        if args.hives is not None
+        else request_with_retries("list hives", args, client.list_hives)
+    )
     schedule: list[tuple[str, str]] = []
 
     for hive in hives:
         try:
-            days = client.list_days(hive)
+            days = request_with_retries(
+                f"list days for {hive}", args, lambda hive=hive: client.list_days(hive)
+            )
         except Exception as exc:
             print(f"Skipping hive {hive}: failed to list days: {exc}")
             continue
@@ -207,6 +247,50 @@ def schedule_signature(args: Args) -> dict[str, Any]:
         "start_date": args.start_date.isoformat() if args.start_date else None,
         "end_date": args.end_date.isoformat() if args.end_date else None,
     }
+
+
+def request_with_retries[T](label: str, args: Args, request: Callable[[], T]) -> T:
+    attempts = 0
+    while True:
+        if args.delay > 0:
+            time.sleep(args.delay)
+
+        try:
+            return request()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 429 or attempts >= args.max_retries:
+                raise
+
+            attempts += 1
+            wait_seconds = retry_after_seconds(exc.response) or max(
+                args.delay, min(60.0, 2.0**attempts)
+            )
+            print(
+                f"  rate limited during {label}; waiting {wait_seconds:.1f}s "
+                f"(retry {attempts}/{args.max_retries})"
+            )
+            time.sleep(wait_seconds)
+
+
+def retry_after_seconds(response: httpx.Response) -> float | None:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is None:
+        return None
+
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(retry_after)
+    except (TypeError, ValueError):
+        return None
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=dt.UTC)
+    now = dt.datetime.now(dt.UTC)
+    return max(0.0, (retry_at - now).total_seconds())
 
 
 def diverse_times(
@@ -239,15 +323,19 @@ def diverse_times(
 
 
 def try_download_video(
-    client: AppMaisClient, output: Path, hive: str, day: str, time: str
+    client: AppMaisClient, args: Args, hive: str, day: str, time: str
 ) -> ManifestRecord:
     try:
-        video = client.get_video(hive, day, time)
+        video = request_with_retries(
+            f"resolve video {hive} {day} {time}",
+            args,
+            lambda hive=hive, day=day, time=time: client.get_video(hive, day, time),
+        )
     except Exception as exc:
         status = classify_exception(exc)
         return make_record(hive, day, time, status, reason=str(exc))
 
-    destination = output / video.filename
+    destination = args.output / video.filename
     if destination.exists():
         return make_record(hive, day, time, "downloaded", path=destination)
 
@@ -256,7 +344,13 @@ def try_download_video(
         part_destination.unlink()
 
     try:
-        download_to_part(client, video, part_destination)
+        request_with_retries(
+            f"download video {hive} {day} {time}",
+            args,
+            lambda video=video, part_destination=part_destination: download_to_part(
+                client, video, part_destination
+            ),
+        )
         part_destination.replace(destination)
     except Exception as exc:
         if part_destination.exists():
