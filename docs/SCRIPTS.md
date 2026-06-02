@@ -64,6 +64,23 @@ uv run python scripts/dino_video_heatmap.py input.mp4 output.mp4
 The script automatically uses CUDA, then MPS, then CPU.
 Use `--max-frames N` for quick smoke tests.
 
+## `scripts/dino_foreground_masks.py`
+
+Creates pseudo-foreground masks for already extracted JPG frames with DINOv3. The script uses CLS-vs-patch cosine similarity, normalizes each frame's patch heatmap to 0-1, thresholds it, and writes matching `_mask.png` files for `scripts/visualize_extracted_frames.py`.
+
+```bash
+uv run python scripts/dino_foreground_masks.py data/frames
+```
+
+Useful options:
+
+- `--model-name vit_small_patch16_dinov3`: timm DINO model to use.
+- `--threshold 0.6`: normalized similarity threshold; lower values create larger foreground masks.
+- `--batch-size 8`: number of frames to process at once.
+- `--overwrite`: replace existing `_mask.png` files instead of skipping them.
+
+DINOv3 is not a segmentation model, so these masks are saliency-style pseudo-foreground masks rather than true object masks. The script automatically uses CUDA, then MPS, then CPU.
+
 ## `scripts/appmais_download_diverse.py`
 
 Downloads a diverse AppMAIS video sample without listing every video upfront. It lists hives/days, shuffles hive/day pairs by seed, then lazily lists times only for the current hive/day.
