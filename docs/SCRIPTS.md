@@ -1,5 +1,28 @@
 # Scripts
 
+## `scripts/extract_video_frames.py`
+
+Extracts representative frames from videos without saving every repetitive frame. The script samples candidate frames at a fixed time interval, then only saves a frame when it is visually different enough from the last saved frame.
+
+```bash
+uv run python scripts/extract_video_frames.py data/videos_raw data/frames
+```
+
+For one video:
+
+```bash
+uv run python scripts/extract_video_frames.py input.mp4 data/frames
+```
+
+Useful options:
+
+- `--sample-every-seconds 2.0`: how often to inspect a candidate frame.
+- `--diff-threshold 8.0`: minimum visual difference from the last saved frame.
+- `--min-gap-seconds 5.0`: minimum time between saved frames.
+- `--max-frames-per-video 200`: cap saved frames per video.
+
+If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them.
+
 ## `scripts/dino_video_heatmap.py`
 
 Creates a DINO-style heatmap overlay video from an input video using CLS-vs-patch cosine similarity.
