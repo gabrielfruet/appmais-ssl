@@ -23,8 +23,8 @@ Useful options:
 - `--skip-start-seconds 5.0`: ignore the first N seconds of each video before exporting frames.
 - `--foreground-masks`: save a MOG2 foreground mask beside each exported frame.
 - `--mog2-history 500`: number of frames used by MOG2 to model the background.
-- `--mog2-var-threshold 16.0`: MOG2 variance threshold; lower values make foreground detection more sensitive.
-- `--mog2-downsample-width 320`: run MOG2 on frames downsampled to this width, then resize masks back to the exported frame size.
+- `--mog2-var-threshold 4.0`: MOG2 variance threshold; lower values make foreground detection more sensitive.
+- `--mog2-downsample-width 320`: run MOG2 on blurred frames downsampled to this width, then resize masks back to the exported frame size.
 - `--overwrite`: delete existing JPG frames and foreground masks for a video and regenerate them.
 
 Foreground masks are saved as PNG files with the same stem as each JPG plus `_mask`, for example `frame_000001_t000000.0s_mask.png`. Mask pixels use `0` for background, `127` for shadow, and `255` for foreground.
@@ -33,7 +33,7 @@ Foreground masks are saved as PNG files with the same stem as each JPG plus `_ma
 uv run python scripts/extract_video_frames.py data/videos_raw data/frames --foreground-masks
 ```
 
-By default, videos with existing extracted JPG frames are skipped, and the first 5 seconds of each video are ignored. This makes reruns safe and deterministic and avoids exporting startup frames. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history. MOG2 runs on downsampled frames by default, which is faster and usually produces smoother masks; the saved masks are resized back to the exported frame size.
+By default, videos with existing extracted JPG frames are skipped, and the first 5 seconds of each video are ignored. This makes reruns safe and deterministic and avoids exporting startup frames. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history. MOG2 runs on downsampled, Gaussian-blurred frames by default, which is faster and usually produces smoother masks; the saved masks are resized back to the exported frame size.
 
 ## `scripts/dino_video_heatmap.py`
 

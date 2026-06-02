@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 VIDEO_EXTENSIONS = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 THUMBNAIL_SIZE = (64, 64)
+MOG2_BLUR_KERNEL_SIZE = (5, 5)
 
 
 def find_videos(input_path: Path) -> list[Path]:
@@ -67,6 +68,11 @@ def downsample_for_mog2(frame: np.ndarray, max_width: int) -> np.ndarray:
     scale = max_width / width
     resized_height = max(1, round(height * scale))
     return cv2.resize(frame, (max_width, resized_height), interpolation=cv2.INTER_AREA)
+
+
+def preprocess_for_mog2(frame: np.ndarray, max_width: int) -> np.ndarray:
+    downsampled = downsample_for_mog2(frame, max_width)
+    return cv2.GaussianBlur(downsampled, MOG2_BLUR_KERNEL_SIZE, 0)
 
 
 def normalize_mog2_mask(mask: np.ndarray) -> np.ndarray:
@@ -198,7 +204,7 @@ def extract_frames(
                     break
 
                 timestamp_seconds = frame_index / fps
-                mog2_frame = downsample_for_mog2(frame, mog2_downsample_width)
+                mog2_frame = preprocess_for_mog2(frame, mog2_downsample_width)
                 raw_mask = background_subtractor.apply(mog2_frame)
                 frame_index += 1
 
@@ -361,7 +367,7 @@ def extract_frames(
 @click.option(
     "--mog2-var-threshold",
     type=float,
-    default=16.0,
+    default=4.0,
     show_default=True,
     help="MOG2 variance threshold; lower values make detection more sensitive.",
 )
