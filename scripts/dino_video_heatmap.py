@@ -15,12 +15,12 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-MODEL_NAME = "vit_base_patch14_dinov2"
+MODEL_NAME = "vit_small_patch14_dinov2"
 IMAGE_SIZE = 518
 HEATMAP_ALPHA = 0.45
 FRAME_ALPHA = 1.0 - HEATMAP_ALPHA
 COLORMAP = cv2.COLORMAP_INFERNO
-BATCH_SIZE = 1
+BATCH_SIZE = 8
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -35,7 +35,7 @@ def pick_device() -> torch.device:
 
 def frame_to_tensor(frame: np.ndarray, device: torch.device) -> torch.Tensor:
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    rgb = cv2.resize(rgb, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+    rgb = cv2.resize(rgb, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_CUBIC)
     image = rgb.astype(np.float32) / 255.0
     image = (image - IMAGENET_MEAN) / IMAGENET_STD
     image = np.transpose(image, (2, 0, 1))
@@ -83,7 +83,7 @@ def heatmaps_for_frames(
         heatmap = heatmap.float().cpu().numpy()
         heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
         heatmap = cv2.resize(
-            heatmap, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST
+            heatmap, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_CUBIC
         )
         heatmaps.append(heatmap)
 
