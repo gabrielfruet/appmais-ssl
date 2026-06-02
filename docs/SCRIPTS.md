@@ -20,6 +20,7 @@ Useful options:
 - `--diff-threshold 8.0`: minimum visual difference from the last saved frame.
 - `--min-gap-seconds 5.0`: minimum time between saved frames.
 - `--max-frames-per-video 200`: cap saved frames per video.
+- `--skip-start-seconds 5.0`: ignore the first N seconds of each video before exporting frames.
 - `--foreground-masks`: save a MOG2 foreground mask beside each exported frame.
 - `--mog2-history 500`: number of frames used by MOG2 to model the background.
 - `--mog2-var-threshold 16.0`: MOG2 variance threshold; lower values make foreground detection more sensitive.
@@ -31,7 +32,7 @@ Foreground masks are saved as PNG files with the same stem as each JPG plus `_ma
 uv run python scripts/extract_video_frames.py data/videos_raw data/frames --foreground-masks
 ```
 
-By default, videos with existing extracted JPG frames are skipped. This makes reruns safe and deterministic. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history; this is slower than the default seek-based extraction but produces better masks.
+By default, videos with existing extracted JPG frames are skipped, and the first 5 seconds of each video are ignored. This makes reruns safe and deterministic and avoids exporting startup frames. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history; this is slower than the default seek-based extraction but produces better masks.
 
 ## `scripts/dino_video_heatmap.py`
 

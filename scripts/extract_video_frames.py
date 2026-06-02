@@ -111,6 +111,7 @@ def extract_frames(
     min_gap_seconds: float,
     max_frames: int,
     jpeg_quality: int,
+    skip_start_seconds: float,
     overwrite: bool,
     foreground_masks: bool,
     mog2_history: int,
@@ -141,7 +142,15 @@ def extract_frames(
             raise click.ClickException(f"Could not read video metadata: {video_path}")
 
         duration_seconds = total_frames / fps
-        candidate_count = int(duration_seconds / sample_every_seconds) + 1
+        if skip_start_seconds >= duration_seconds:
+            click.echo(
+                f"{video_path.name}: skipped, duration {duration_seconds:.1f}s "
+                f"is not longer than --skip-start-seconds {skip_start_seconds:.1f}s"
+            )
+            return 0
+
+        export_duration_seconds = duration_seconds - skip_start_seconds
+        candidate_count = int(export_duration_seconds / sample_every_seconds) + 1
         last_saved_signature: np.ndarray | None = None
         last_saved_time = -min_gap_seconds
         saved_count = 0
@@ -153,7 +162,7 @@ def extract_frames(
                 varThreshold=mog2_var_threshold,
                 detectShadows=True,
             )
-            next_sample_time = 0.0
+            next_sample_time = skip_start_seconds
             frame_index = 0
             progress = tqdm(
                 total=candidate_count,
@@ -213,7 +222,9 @@ def extract_frames(
                 if saved_count >= max_frames:
                     break
 
-                timestamp_seconds = candidate_index * sample_every_seconds
+                timestamp_seconds = skip_start_seconds + (
+                    candidate_index * sample_every_seconds
+                )
                 capture.set(cv2.CAP_PROP_POS_MSEC, timestamp_seconds * 1000.0)
                 ok, frame = capture.read()
                 if not ok:
@@ -293,6 +304,13 @@ def extract_frames(
     help="JPEG quality for saved frames.",
 )
 @click.option(
+    "--skip-start-seconds",
+    type=float,
+    default=5.0,
+    show_default=True,
+    help="Do not export frames from the first N seconds of each video.",
+)
+@click.option(
     "--overwrite",
     is_flag=True,
     help=(
@@ -330,6 +348,7 @@ def main(
     min_gap_seconds: float,
     max_frames_per_video: int,
     jpeg_quality: int,
+    skip_start_seconds: float,
     overwrite: bool,
     foreground_masks: bool,
     mog2_history: int,
@@ -343,6 +362,8 @@ def main(
         raise click.ClickException("--min-gap-seconds cannot be negative")
     if max_frames_per_video <= 0:
         raise click.ClickException("--max-frames-per-video must be positive")
+    if skip_start_seconds < 0.0:
+        raise click.ClickException("--skip-start-seconds cannot be negative")
     if mog2_history <= 0:
         raise click.ClickException("--mog2-history must be positive")
     if mog2_var_threshold <= 0.0:
@@ -361,6 +382,7 @@ def main(
             min_gap_seconds=min_gap_seconds,
             max_frames=max_frames_per_video,
             jpeg_quality=jpeg_quality,
+            skip_start_seconds=skip_start_seconds,
             overwrite=overwrite,
             foreground_masks=foreground_masks,
             mog2_history=mog2_history,
