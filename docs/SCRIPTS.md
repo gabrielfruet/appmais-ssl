@@ -35,6 +35,24 @@ uv run python scripts/extract_video_frames.py data/videos_raw data/frames --fore
 
 By default, videos with existing extracted JPG frames are skipped, and the first 5 seconds of each video are ignored. This makes reruns safe and deterministic and avoids exporting startup frames. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history. MOG2 runs on downsampled, Gaussian-blurred frames by default, which is faster and usually produces smoother masks; the saved masks are resized back to the exported frame size.
 
+## `scripts/visualize_extracted_frames.py`
+
+Creates static contact-sheet images for extracted video frames. Point it at the frame extraction output directory; it writes one JPG contact sheet per video subdirectory.
+
+```bash
+uv run python scripts/visualize_extracted_frames.py data/frames data/frame_visualizations
+```
+
+Useful options:
+
+- `--max-frames-per-video 40`: maximum frames to show per contact sheet, selected evenly across the extracted frames.
+- `--columns 5`: number of thumbnails per row.
+- `--thumbnail-width 240`: thumbnail width in pixels.
+- `--hide-masks`: do not overlay foreground masks.
+- `--mask-alpha 0.45`: foreground mask overlay opacity.
+
+If matching `_mask.png` files exist, the script overlays them by default: shadow pixels are yellow and foreground pixels are red.
+
 ## `scripts/dino_video_heatmap.py`
 
 Creates a DINO-style heatmap overlay video from an input video using CLS-vs-patch cosine similarity.
