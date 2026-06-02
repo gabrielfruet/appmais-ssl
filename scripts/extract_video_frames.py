@@ -59,11 +59,32 @@ def output_path_for_mask(frame_path: Path) -> Path:
     return frame_path.with_name(f"{frame_path.stem}_mask.png")
 
 
+def downsample_for_mog2(frame: np.ndarray, max_width: int) -> np.ndarray:
+    height, width = frame.shape[:2]
+    if width <= max_width:
+        return frame
+
+    scale = max_width / width
+    resized_height = max(1, round(height * scale))
+    return cv2.resize(frame, (max_width, resized_height), interpolation=cv2.INTER_AREA)
+
+
 def normalize_mog2_mask(mask: np.ndarray) -> np.ndarray:
     normalized = np.zeros_like(mask, dtype=np.uint8)
     normalized[mask == 127] = 127
     normalized[mask > 127] = 255
     return normalized
+
+
+def resize_mask_to_frame(mask: np.ndarray, frame: np.ndarray) -> np.ndarray:
+    frame_height, frame_width = frame.shape[:2]
+    if mask.shape[:2] == (frame_height, frame_width):
+        return mask
+    return cv2.resize(
+        mask,
+        (frame_width, frame_height),
+        interpolation=cv2.INTER_NEAREST,
+    )
 
 
 def write_frame(
@@ -116,6 +137,7 @@ def extract_frames(
     foreground_masks: bool,
     mog2_history: int,
     mog2_var_threshold: float,
+    mog2_downsample_width: int,
 ) -> int:
     video_output_dir = output_dir_for_video(output_dir, video_path)
     existing_frames = sorted(video_output_dir.glob("*.jpg"))
@@ -176,7 +198,8 @@ def extract_frames(
                     break
 
                 timestamp_seconds = frame_index / fps
-                raw_mask = background_subtractor.apply(frame)
+                mog2_frame = downsample_for_mog2(frame, mog2_downsample_width)
+                raw_mask = background_subtractor.apply(mog2_frame)
                 frame_index += 1
 
                 if timestamp_seconds + 1e-9 < next_sample_time:
@@ -205,7 +228,9 @@ def extract_frames(
                     frame_path=frame_path,
                     frame=frame,
                     jpeg_quality=jpeg_quality,
-                    foreground_mask=normalize_mog2_mask(raw_mask),
+                    foreground_mask=resize_mask_to_frame(
+                        normalize_mog2_mask(raw_mask), frame
+                    ),
                 )
 
                 last_saved_signature = signature
@@ -340,6 +365,16 @@ def extract_frames(
     show_default=True,
     help="MOG2 variance threshold; lower values make detection more sensitive.",
 )
+@click.option(
+    "--mog2-downsample-width",
+    type=int,
+    default=320,
+    show_default=True,
+    help=(
+        "Downsample frames to this width before MOG2; masks are resized "
+        "back to the exported frame size."
+    ),
+)
 def main(
     input_path: Path,
     output_dir: Path,
@@ -353,6 +388,7 @@ def main(
     foreground_masks: bool,
     mog2_history: int,
     mog2_var_threshold: float,
+    mog2_downsample_width: int,
 ) -> None:
     if sample_every_seconds <= 0.0:
         raise click.ClickException("--sample-every-seconds must be positive")
@@ -368,6 +404,8 @@ def main(
         raise click.ClickException("--mog2-history must be positive")
     if mog2_var_threshold <= 0.0:
         raise click.ClickException("--mog2-var-threshold must be positive")
+    if mog2_downsample_width <= 0:
+        raise click.ClickException("--mog2-downsample-width must be positive")
 
     videos = find_videos(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +425,7 @@ def main(
             foreground_masks=foreground_masks,
             mog2_history=mog2_history,
             mog2_var_threshold=mog2_var_threshold,
+            mog2_downsample_width=mog2_downsample_width,
         )
 
     click.echo(f"Saved {total_saved} frames from {len(videos)} video(s).")
