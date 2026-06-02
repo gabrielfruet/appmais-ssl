@@ -44,10 +44,14 @@ def safe_stem(path: Path) -> str:
     return path.stem.replace("/", "_").replace(":", "-")
 
 
+def output_dir_for_video(output_dir: Path, video_path: Path) -> Path:
+    return output_dir / safe_stem(video_path)
+
+
 def output_path_for_frame(
     output_dir: Path, video_path: Path, saved_count: int, timestamp_seconds: float
 ) -> Path:
-    video_dir = output_dir / safe_stem(video_path)
+    video_dir = output_dir_for_video(output_dir, video_path)
     return video_dir / f"frame_{saved_count:06d}_t{timestamp_seconds:08.1f}s.jpg"
 
 
@@ -59,7 +63,21 @@ def extract_frames(
     min_gap_seconds: float,
     max_frames: int,
     jpeg_quality: int,
+    overwrite: bool,
 ) -> int:
+    video_output_dir = output_dir_for_video(output_dir, video_path)
+    existing_frames = sorted(video_output_dir.glob("*.jpg"))
+    if existing_frames and not overwrite:
+        click.echo(
+            f"{video_path.name}: skipped, found {len(existing_frames)} "
+            f"existing frame(s) in {video_output_dir}. "
+            "Use --overwrite to regenerate."
+        )
+        return 0
+    if existing_frames and overwrite:
+        for frame_path in existing_frames:
+            frame_path.unlink()
+
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise click.ClickException(f"Could not open video: {video_path}")
@@ -119,7 +137,7 @@ def extract_frames(
 
         click.echo(
             f"{video_path.name}: sampled {sampled_count}, saved {saved_count} "
-            f"to {output_dir / safe_stem(video_path)}"
+            f"to {video_output_dir}"
         )
         return saved_count
     finally:
@@ -164,6 +182,11 @@ def extract_frames(
     show_default=True,
     help="JPEG quality for saved frames.",
 )
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Delete existing JPG frames for a video and regenerate them.",
+)
 def main(
     input_path: Path,
     output_dir: Path,
@@ -172,6 +195,7 @@ def main(
     min_gap_seconds: float,
     max_frames_per_video: int,
     jpeg_quality: int,
+    overwrite: bool,
 ) -> None:
     if sample_every_seconds <= 0.0:
         raise click.ClickException("--sample-every-seconds must be positive")
@@ -195,6 +219,7 @@ def main(
             min_gap_seconds=min_gap_seconds,
             max_frames=max_frames_per_video,
             jpeg_quality=jpeg_quality,
+            overwrite=overwrite,
         )
 
     click.echo(f"Saved {total_saved} frames from {len(videos)} video(s).")

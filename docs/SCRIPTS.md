@@ -20,8 +20,9 @@ Useful options:
 - `--diff-threshold 8.0`: minimum visual difference from the last saved frame.
 - `--min-gap-seconds 5.0`: minimum time between saved frames.
 - `--max-frames-per-video 200`: cap saved frames per video.
+- `--overwrite`: delete existing JPG frames for a video and regenerate them.
 
-If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them.
+By default, videos with existing extracted JPG frames are skipped. This makes reruns safe and deterministic. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them.
 
 ## `scripts/dino_video_heatmap.py`
 
