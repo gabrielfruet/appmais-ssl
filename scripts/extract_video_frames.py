@@ -55,6 +55,54 @@ def output_path_for_frame(
     return video_dir / f"frame_{saved_count:06d}_t{timestamp_seconds:08.1f}s.jpg"
 
 
+def output_path_for_mask(frame_path: Path) -> Path:
+    return frame_path.with_name(f"{frame_path.stem}_mask.png")
+
+
+def normalize_mog2_mask(mask: np.ndarray) -> np.ndarray:
+    normalized = np.zeros_like(mask, dtype=np.uint8)
+    normalized[mask == 127] = 127
+    normalized[mask > 127] = 255
+    return normalized
+
+
+def write_frame(
+    frame_path: Path,
+    frame: np.ndarray,
+    jpeg_quality: int,
+    foreground_mask: np.ndarray | None,
+) -> None:
+    frame_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(frame_path), frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+    if not ok:
+        raise click.ClickException(f"Could not write frame: {frame_path}")
+
+    if foreground_mask is None:
+        return
+
+    mask_path = output_path_for_mask(frame_path)
+    ok = cv2.imwrite(str(mask_path), foreground_mask)
+    if not ok:
+        raise click.ClickException(f"Could not write foreground mask: {mask_path}")
+
+
+def should_save_frame(
+    frame: np.ndarray,
+    timestamp_seconds: float,
+    last_saved_signature: np.ndarray | None,
+    last_saved_time: float,
+    min_gap_seconds: float,
+    diff_threshold: float,
+) -> tuple[bool, np.ndarray]:
+    signature = frame_signature(frame)
+    enough_gap = timestamp_seconds - last_saved_time >= min_gap_seconds
+    different_enough = (
+        last_saved_signature is None
+        or frame_difference(signature, last_saved_signature) >= diff_threshold
+    )
+    return enough_gap and different_enough, signature
+
+
 def extract_frames(
     video_path: Path,
     output_dir: Path,
@@ -64,9 +112,13 @@ def extract_frames(
     max_frames: int,
     jpeg_quality: int,
     overwrite: bool,
+    foreground_masks: bool,
+    mog2_history: int,
+    mog2_var_threshold: float,
 ) -> int:
     video_output_dir = output_dir_for_video(output_dir, video_path)
     existing_frames = sorted(video_output_dir.glob("*.jpg"))
+    existing_masks = sorted(video_output_dir.glob("*_mask.png"))
     if existing_frames and not overwrite:
         click.echo(
             f"{video_path.name}: skipped, found {len(existing_frames)} "
@@ -74,9 +126,9 @@ def extract_frames(
             "Use --overwrite to regenerate."
         )
         return 0
-    if existing_frames and overwrite:
-        for frame_path in existing_frames:
-            frame_path.unlink()
+    if overwrite:
+        for output_path in [*existing_frames, *existing_masks]:
+            output_path.unlink()
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -95,45 +147,103 @@ def extract_frames(
         saved_count = 0
         sampled_count = 0
 
-        progress = tqdm(
-            range(candidate_count),
-            desc=video_path.name,
-            unit="sample",
-            leave=False,
-        )
-        for candidate_index in progress:
-            if saved_count >= max_frames:
-                break
-
-            timestamp_seconds = candidate_index * sample_every_seconds
-            capture.set(cv2.CAP_PROP_POS_MSEC, timestamp_seconds * 1000.0)
-            ok, frame = capture.read()
-            if not ok:
-                continue
-
-            sampled_count += 1
-            signature = frame_signature(frame)
-            enough_gap = timestamp_seconds - last_saved_time >= min_gap_seconds
-            different_enough = (
-                last_saved_signature is None
-                or frame_difference(signature, last_saved_signature) >= diff_threshold
+        if foreground_masks:
+            background_subtractor = cv2.createBackgroundSubtractorMOG2(
+                history=mog2_history,
+                varThreshold=mog2_var_threshold,
+                detectShadows=True,
             )
-            if not enough_gap or not different_enough:
-                continue
-
-            saved_count += 1
-            frame_path = output_path_for_frame(
-                output_dir, video_path, saved_count, timestamp_seconds
+            next_sample_time = 0.0
+            frame_index = 0
+            progress = tqdm(
+                total=candidate_count,
+                desc=video_path.name,
+                unit="sample",
+                leave=False,
             )
-            frame_path.parent.mkdir(parents=True, exist_ok=True)
-            ok = cv2.imwrite(
-                str(frame_path), frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-            )
-            if not ok:
-                raise click.ClickException(f"Could not write frame: {frame_path}")
+            while saved_count < max_frames:
+                ok, frame = capture.read()
+                if not ok:
+                    break
 
-            last_saved_signature = signature
-            last_saved_time = timestamp_seconds
+                timestamp_seconds = frame_index / fps
+                raw_mask = background_subtractor.apply(frame)
+                frame_index += 1
+
+                if timestamp_seconds + 1e-9 < next_sample_time:
+                    continue
+
+                progress.update(1)
+                sampled_count += 1
+                should_save, signature = should_save_frame(
+                    frame=frame,
+                    timestamp_seconds=timestamp_seconds,
+                    last_saved_signature=last_saved_signature,
+                    last_saved_time=last_saved_time,
+                    min_gap_seconds=min_gap_seconds,
+                    diff_threshold=diff_threshold,
+                )
+                while next_sample_time <= timestamp_seconds:
+                    next_sample_time += sample_every_seconds
+                if not should_save:
+                    continue
+
+                saved_count += 1
+                frame_path = output_path_for_frame(
+                    output_dir, video_path, saved_count, timestamp_seconds
+                )
+                write_frame(
+                    frame_path=frame_path,
+                    frame=frame,
+                    jpeg_quality=jpeg_quality,
+                    foreground_mask=normalize_mog2_mask(raw_mask),
+                )
+
+                last_saved_signature = signature
+                last_saved_time = timestamp_seconds
+            progress.close()
+        else:
+            progress = tqdm(
+                range(candidate_count),
+                desc=video_path.name,
+                unit="sample",
+                leave=False,
+            )
+            for candidate_index in progress:
+                if saved_count >= max_frames:
+                    break
+
+                timestamp_seconds = candidate_index * sample_every_seconds
+                capture.set(cv2.CAP_PROP_POS_MSEC, timestamp_seconds * 1000.0)
+                ok, frame = capture.read()
+                if not ok:
+                    continue
+
+                sampled_count += 1
+                should_save, signature = should_save_frame(
+                    frame=frame,
+                    timestamp_seconds=timestamp_seconds,
+                    last_saved_signature=last_saved_signature,
+                    last_saved_time=last_saved_time,
+                    min_gap_seconds=min_gap_seconds,
+                    diff_threshold=diff_threshold,
+                )
+                if not should_save:
+                    continue
+
+                saved_count += 1
+                frame_path = output_path_for_frame(
+                    output_dir, video_path, saved_count, timestamp_seconds
+                )
+                write_frame(
+                    frame_path=frame_path,
+                    frame=frame,
+                    jpeg_quality=jpeg_quality,
+                    foreground_mask=None,
+                )
+
+                last_saved_signature = signature
+                last_saved_time = timestamp_seconds
 
         click.echo(
             f"{video_path.name}: sampled {sampled_count}, saved {saved_count} "
@@ -185,7 +295,32 @@ def extract_frames(
 @click.option(
     "--overwrite",
     is_flag=True,
-    help="Delete existing JPG frames for a video and regenerate them.",
+    help=(
+        "Delete existing JPG frames and foreground masks for a video "
+        "and regenerate them."
+    ),
+)
+@click.option(
+    "--foreground-masks",
+    is_flag=True,
+    help=(
+        "Export a MOG2 foreground mask beside each saved frame. "
+        "Mask values are 0=background, 127=shadow, 255=foreground."
+    ),
+)
+@click.option(
+    "--mog2-history",
+    type=int,
+    default=500,
+    show_default=True,
+    help="Number of frames used by MOG2 to model the background.",
+)
+@click.option(
+    "--mog2-var-threshold",
+    type=float,
+    default=16.0,
+    show_default=True,
+    help="MOG2 variance threshold; lower values make detection more sensitive.",
 )
 def main(
     input_path: Path,
@@ -196,6 +331,9 @@ def main(
     max_frames_per_video: int,
     jpeg_quality: int,
     overwrite: bool,
+    foreground_masks: bool,
+    mog2_history: int,
+    mog2_var_threshold: float,
 ) -> None:
     if sample_every_seconds <= 0.0:
         raise click.ClickException("--sample-every-seconds must be positive")
@@ -205,6 +343,10 @@ def main(
         raise click.ClickException("--min-gap-seconds cannot be negative")
     if max_frames_per_video <= 0:
         raise click.ClickException("--max-frames-per-video must be positive")
+    if mog2_history <= 0:
+        raise click.ClickException("--mog2-history must be positive")
+    if mog2_var_threshold <= 0.0:
+        raise click.ClickException("--mog2-var-threshold must be positive")
 
     videos = find_videos(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +362,9 @@ def main(
             max_frames=max_frames_per_video,
             jpeg_quality=jpeg_quality,
             overwrite=overwrite,
+            foreground_masks=foreground_masks,
+            mog2_history=mog2_history,
+            mog2_var_threshold=mog2_var_threshold,
         )
 
     click.echo(f"Saved {total_saved} frames from {len(videos)} video(s).")
