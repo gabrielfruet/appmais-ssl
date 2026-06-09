@@ -54,6 +54,28 @@ Useful options:
 
 If matching `_mask.png` files exist, the script overlays them by default: shadow pixels are yellow and foreground pixels are red.
 
+## `scripts/smoke_bee_dataset.py`
+
+Smoke-tests `engine.dataset.BeeCropDataset` by iterating N samples, saving per-sample original/mask/swapped crops, and building two montages for visual inspection.
+
+```bash
+uv run python scripts/smoke_bee_dataset.py data/frames \
+    --num-samples 16 --output samples/bees
+```
+
+Defaults: `ROOT=data/frames`, `num_samples=16`, `output=samples/bees`. The script instantiates the dataset with `crop_size=224` and `swap_background_prob=0.5`, then for each item saves:
+
+- `sample_<idx:03d>_original.jpg` — the unswapped crop at the same window.
+- `sample_<idx:03d>_mask.png` — the mask with class 0/1/2 scaled by 127.
+- `sample_<idx:03d>{_swapped}.jpg` — the final (possibly swapped) crop; the `_swapped` suffix is added when the background was actually swapped.
+
+It also writes two montages:
+
+- `contact_sheet.jpg` — 4×4 grid of the swapped crops.
+- `compare.jpg` — 3-column montage (`original | mask | swapped`), one row per sample.
+
+Quantitative sanity checks (centering, coverage, swap diff, swap ratio, non-black) run during the script. A swap-ratio warning is logged (not failed) when the ratio falls outside `[0.2, 0.8]` with a pool of >=2 entries. Exit code is non-zero with a clear message if any hard check fails.
+
 ## `scripts/dino_video_heatmap.py`
 
 Creates a DINO-style heatmap overlay video from an input video using CLS-vs-patch cosine similarity.
