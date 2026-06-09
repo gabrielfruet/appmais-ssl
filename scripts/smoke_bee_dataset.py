@@ -40,7 +40,6 @@ COVERAGE_LOW = 0.02
 COVERAGE_HIGH = 0.60
 SWAP_RATIO_LOW = 0.20
 SWAP_RATIO_HIGH = 0.80
-BG_MIN_RATIO = 1.5
 
 
 def _tensor_to_uint8_rgb(tensor: torch.Tensor) -> np.ndarray:
@@ -197,8 +196,7 @@ def _check_background_sizes(dataset: BeeCropDataset, failures: list[str]) -> Non
             failures.append(f"could not read first frame in {video_dir}")
             continue
         frame_h, frame_w = first_frame.shape[:2]
-        min_frame_dim = min(frame_h, frame_w)
-        if bg_w < BG_MIN_RATIO * min_frame_dim or bg_h < BG_MIN_RATIO * min_frame_dim:
+        if bg_w < frame_w or bg_h < frame_h:
             failures.append(
                 f"background.png in {video_dir.name} is {bg_w}x{bg_h}, "
                 f"frames are {frame_w}x{frame_h} — blurry-background regression"
