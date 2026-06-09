@@ -1,5 +1,25 @@
 # Scripts
 
+## `scripts/curate_videos.py`
+
+Scores every `*.mp4` in a directory on sharpness (Laplacian variance), motion (mean absolute frame difference at 160x120 grayscale) and brightness (mean grayscale), samples from the middle 90% of each video, prints a ranked table of every video, and writes a curated list of the top-N diverse videos (one absolute path per line) to a text file. The "diverse" picking rule is greedy by score with a hive-id guard: the next picked video must come from a hive that isn't already represented in the current top-N.
+
+```bash
+uv run python scripts/curate_videos.py data/videos_raw \
+    --output data/curated_videos.txt --top-n 8
+```
+
+Useful options:
+
+- `--top-n 8`: number of diverse videos to keep after filtering.
+- `--sharpness-min 100.0`: drop videos whose mean Laplacian variance is below this.
+- `--motion-min 0.5`: drop videos whose mean inter-frame pixel diff is below this.
+- `--brightness-min 60.0`: drop videos whose mean grayscale value is below this.
+- `--num-samples 8`: frames to sample per video when computing scores.
+- `--strict`: exit non-zero if the curated list ends up with fewer than `--top-n` entries (e.g. when a tighter filter starves the picker).
+
+Output file format (`data/curated_videos.txt` by default): a `#`-prefixed comment header line followed by one absolute video path per line. `scripts/extract_video_frames.py --videos-file` reads this file directly.
+
 ## `scripts/extract_video_frames.py`
 
 Extracts representative frames from videos without saving every repetitive frame. The script samples candidate frames at a fixed time interval, then only saves a frame when it is visually different enough from the last saved frame.
@@ -14,6 +34,14 @@ For one video:
 uv run python scripts/extract_video_frames.py input.mp4 data/frames
 ```
 
+For a curated list of videos (produced by `scripts/curate_videos.py`):
+
+```bash
+uv run python scripts/extract_video_frames.py data/videos_raw data/frames \
+    --videos-file data/curated_videos.txt \
+    --foreground-masks --save-background --overwrite
+```
+
 Useful options:
 
 - `--sample-every-seconds 2.0`: how often to inspect a candidate frame.
@@ -21,20 +49,22 @@ Useful options:
 - `--min-gap-seconds 5.0`: minimum time between saved frames.
 - `--max-frames-per-video 200`: cap saved frames per video.
 - `--skip-start-seconds 5.0`: ignore the first N seconds of each video before exporting frames.
+- `--videos-file PATH`: optional text file with one video path per line (`#` comments and blank lines ignored). When set, only these videos are processed and the directory scan is skipped. Mutually exclusive in spirit with passing a directory that has many videos you don't want to process.
+- `--min-bee-area 50`: minimum foreground component area (in pixels) for a frame to be saved. Frames whose MOG2 mask has no component of at least this size are skipped and counted in the per-video summary. Requires `--foreground-masks`; ignored otherwise.
 - `--foreground-masks`: save a MOG2 foreground mask beside each exported frame.
-- `--save-background`: after the MOG2 loop finishes, write the learned background image to `<video_output_dir>/background.png` as a BGR PNG. The image is saved at MOG2's downsampled size (default 320px wide). Requires `--foreground-masks`; ignored otherwise. Re-runs require `--overwrite` to refresh the file.
+- `--save-background`: after the MOG2 loop finishes, write the learned background image to `<video_output_dir>/background.png` as a BGR PNG. The image is upscaled with `cv2.INTER_CUBIC` to the full frame resolution (e.g. 640x480), so consumers can paste bee crops onto a sharp hive scene rather than a soft 320x240 blur. Requires `--foreground-masks`; ignored otherwise. Re-runs require `--overwrite` to refresh the file.
 - `--mog2-history 500`: number of frames used by MOG2 to model the background.
 - `--mog2-var-threshold 4.0`: MOG2 variance threshold; lower values make foreground detection more sensitive.
 - `--mog2-downsample-width 320`: run MOG2 on blurred frames downsampled to this width, then resize masks back to the exported frame size.
-- `--overwrite`: delete existing JPG frames and foreground masks for a video and regenerate them.
+- `--overwrite`: delete existing JPG frames, foreground masks and background.png for a video and regenerate them.
 
-Foreground masks are saved as PNG files with the same stem as each JPG plus `_mask`, for example `frame_000001_t000000.0s_mask.png`. Mask pixels use `0` for background, `127` for shadow, and `255` for foreground. When `--save-background` is also passed, a `background.png` is written to the same video directory.
+Foreground masks are saved as PNG files with the same stem as each JPG plus `_mask`, for example `frame_000001_t000000.0s_mask.png`. Mask pixels use `0` for background, `127` for shadow, and `255` for foreground. When `--save-background` is also passed, a `background.png` is written to the same video directory at the full frame resolution.
 
 ```bash
 uv run python scripts/extract_video_frames.py data/videos_raw data/frames --foreground-masks
 ```
 
-By default, videos with existing extracted JPG frames are skipped, and the first 5 seconds of each video are ignored. This makes reruns safe and deterministic and avoids exporting startup frames. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history. MOG2 runs on downsampled, Gaussian-blurred frames by default, which is faster and usually produces smoother masks; the saved masks are resized back to the exported frame size.
+By default, videos with existing extracted JPG frames are skipped, and the first 5 seconds of each video are ignored. This makes reruns safe and deterministic and avoids exporting startup frames. If too many similar frames are saved, increase `--diff-threshold` or `--min-gap-seconds`. If too few frames are saved, decrease them. When `--foreground-masks` is enabled, the script reads each video sequentially so MOG2 can learn temporal background history. MOG2 runs on downsampled, Gaussian-blurred frames by default, which is faster and usually produces smoother masks; the saved masks are resized back to the exported frame size and the saved background is upsampled with INTER_CUBIC to the full frame size.
 
 ## `scripts/visualize_extracted_frames.py`
 
