@@ -58,3 +58,12 @@ def test_transform_invoked(tmp_path: object) -> None:
 
     ds = BeeCropDataset(str(tmp_path), crop_size=64, transform=mark)
     assert ds[0]["marker"] is True
+
+
+def test_no_bee_filtered_at_init(tmp_path: object) -> None:
+    """Frames whose masks have no foreground are dropped at init."""
+    _write_sample(tmp_path, "vid_a", "frame_with_bee", fg=True)
+    _write_sample(tmp_path, "vid_a", "frame_no_bee", fg=False)
+    ds = BeeCropDataset(str(tmp_path), crop_size=64)
+    assert len(ds) == 1
+    assert all((item["mask"] == 2).sum() > 0 for item in (ds[0],))
