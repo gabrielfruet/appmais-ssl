@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 VIDEO_EXTENSIONS = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 THUMBNAIL_SIZE = (64, 64)
-MOG2_BLUR_KERNEL_SIZE = (5, 5)
+MOG2_BLUR_KERNEL_SIZE = (9, 9)
 
 
 def find_videos(input_path: Path) -> list[Path]:
@@ -367,7 +367,7 @@ def extract_frames(
 @click.option(
     "--mog2-var-threshold",
     type=float,
-    default=4.0,
+    default=2.0,
     show_default=True,
     help="MOG2 variance threshold; lower values make detection more sensitive.",
 )
