@@ -1,9 +1,11 @@
 """Bee crop dataset with optional background swapping.
 
-The dataset walks a directory of frame/mask pairs, picks a connected
-foreground component per sample, crops a square window around it, and
-optionally pastes the crop onto a background drawn from a pool of
-``background.png`` images saved by the frame-extraction pipeline.
+The dataset walks a directory of frame/mask pairs, drops any pair whose
+mask has no foreground component of at least ``min_area``, then for
+each kept sample picks a connected component, crops a square window
+around it, and optionally pastes the crop onto a background drawn from
+a pool of ``background.png`` images saved by the frame-extraction
+pipeline.
 """
 
 from __future__ import annotations
@@ -72,6 +74,20 @@ def discover_backgrounds(root: Path) -> list[Path]:
     return sorted(root.rglob("background.png"))
 
 
+def _filter_samples_with_bees(samples: list[_Sample], min_area: int) -> list[_Sample]:
+    """Drop samples whose mask has no foreground component of at least ``min_area``."""
+    kept: list[_Sample] = []
+    for sample in samples:
+        mask = cv2.imread(str(sample.mask_path), cv2.IMREAD_UNCHANGED)
+        if mask is None:
+            continue
+        if mask.ndim == 3:
+            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        if find_bee_components(mask, min_area):
+            kept.append(sample)
+    return kept
+
+
 def _bgr_to_rgb(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
@@ -124,6 +140,12 @@ class BeeCropDataset(Dataset[dict[str, object]]):
         self._samples = discover_samples(self._root)
         if not self._samples:
             raise ValueError(f"No frame/mask pairs found under {self._root}")
+        self._samples = _filter_samples_with_bees(self._samples, self._min_area)
+        if not self._samples:
+            raise ValueError(
+                f"No frame/mask pairs with foreground components "
+                f"(min_area={self._min_area}) under {self._root}"
+            )
 
         if background_pool is not None:
             self._background_pool = [Path(p) for p in background_pool]
@@ -145,35 +167,6 @@ class BeeCropDataset(Dataset[dict[str, object]]):
     def _rng(self, idx: int) -> np.random.Generator:
         # Mirror torch DataLoader worker seeding by adding idx to base seed.
         return np.random.default_rng(self._seed + int(idx))
-
-    def _no_bee_sample(
-        self, sample: _Sample, frame_bgr: np.ndarray
-    ) -> dict[str, object]:
-        image_rgb = _bgr_to_rgb(frame_bgr)
-        image_resized, _ = _resize_crop(
-            image_rgb,
-            np.zeros(image_rgb.shape[:2], dtype=np.uint8),
-            self._crop_size,
-        )
-        image_tensor = (
-            torch.from_numpy(image_resized).float().div(255.0).permute(2, 0, 1)
-        )
-        zeros_mask = torch.zeros((self._crop_size, self._crop_size), dtype=torch.int64)
-        bbox_tensor = torch.tensor(
-            [0.0, 0.0, float(self._crop_size), float(self._crop_size)],
-            dtype=torch.float32,
-        )
-        result: dict[str, object] = {
-            "image": image_tensor,
-            "mask": zeros_mask,
-            "bbox": bbox_tensor,
-            "video_id": sample.video_id,
-            "frame_id": sample.frame_id,
-            "swapped": False,
-        }
-        if self._transform is not None:
-            result = self._transform(result)
-        return result
 
     def _choose_background(
         self, current_video_id: str, rng: np.random.Generator
@@ -205,7 +198,10 @@ class BeeCropDataset(Dataset[dict[str, object]]):
         height, width = frame_bgr.shape[:2]
         components = find_bee_components(mask, self._min_area)
         if not components:
-            return self._no_bee_sample(sample, frame_bgr)
+            raise ValueError(
+                f"No foreground components in {sample.frame_path} "
+                f"(min_area={self._min_area})"
+            )
 
         bbox: BeeBBox = sample_bee_bbox(components, rng)  # type: ignore[assignment]
         window = square_window(
