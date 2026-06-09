@@ -44,11 +44,17 @@ videos in the dataset.
   existing `find_bee_components` helper), and **saves the MOG2
   background at full frame resolution** by upscaling with
   `cv2.INTER_CUBIC`.
-- **Step 2 (UNCHANGED)**: Pure helpers in `src/engine/bee_crop.py` are
-  done; you should not need to touch them.
+- **Step 2 (MODIFIED)**: `src/engine/bee_crop.py` gets a new pure helper
+  `sample_center_from_distance_transform(mask, rng, crop_size) -> (cy, cx)`
+  that returns a center sampled with probability ∝ EDT of the
+  foreground mask. Pure function, easy to unit-test, no dataset state.
 - **Step 3 (MODIFIED)**: `BeeCropDataset` **removes the no-bee
-  fallback** entirely and **filters samples at `__init__`** so it only
-  contains frames that have at least one foreground component.
+  fallback** entirely, **filters samples at `__init__`** so it only
+  contains frames with foreground, and (3c) **replaces bbox-based
+  center cropping with EDT-driven center sampling** — per-call,
+  seeded by epoch, with the center clamped to keep the crop window
+  in bounds. The bbox is no longer used to center; it was telling
+  us *where the bee is*, not *where its center is*.
 - **Step 4 (MODIFIED)**: The smoke test is stricter and would have
   failed last time:
   - fails if `len(dataset) < num_samples`
@@ -56,6 +62,10 @@ videos in the dataset.
   - fails if any `background.png` is significantly smaller than the
     frames in the same video
   - fails if a swapped sample's background region is a low-detail wash
+  - the **centering window is tightened** from `[0.2, 0.8] * crop_size`
+    to `[0.4, 0.6] * crop_size` — the EDT peak lands near the centre
+    by construction, so the bee's centroid should be near the centre
+    of the crop
 - **Step 5 (MODIFIED)**: One new test confirms the dataset filters
   no-bee samples at init.
 - **Steps 6–8 (MODIFIED)**: Docs, final gate, visual inspection all
@@ -407,6 +417,119 @@ for i in range(3):
 If `data/frames` is empty in your environment, run Step 1 first on the
 curated list.
 
+### 3c. Center sampling via distance transform (REPLACES bbox-centering)
+
+**Files:** `src/engine/bee_crop.py` (new helper) + `src/engine/dataset.py` (use it)
+
+The current `__getitem__` centers the crop on the *bounding box* of
+the largest component. That fails when the bbox is dominated by a
+thin protrusion (centroid lands on a wing-tip or antenna), when two
+components touch, or when the bbox captures a lot of background.
+The bbox tells you *where the bee is*, not *where its center of
+mass is*. The earlier `compare.jpg` showed the symptom clearly:
+crops at very different "scales" because tight bboxes vs loose
+bboxes were the only thing controlling the crop window.
+
+Replace bbox-centering with **density-driven center sampling** using
+the Euclidean distance transform (EDT) of the foreground mask:
+
+1. Build a binary foreground: `foreground = (mask >= 1).astype(np.uint8)`
+   — bee body + shadow halo, treated as one region. The EDT peak
+   lands inside the bee body either way; including the shadow gives
+   a smoother falloff and handles two-bees-touching-via-shadow
+   naturally.
+2. Compute `edt = cv2.distanceTransform(foreground, cv2.DIST_L2, 5)`.
+3. Flatten and normalize: `probs = edt.ravel() / edt.sum()`.
+   Background pixels have `edt == 0` and contribute zero probability.
+   Remaining foreground pixels are sampled in proportion to their
+   distance value (deeper = denser = more likely).
+4. Sample one flat index: `choice = rng.choice(flat.size, p=probs)`.
+   Unravel: `cy, cx = np.unravel_index(choice, edt.shape)`.
+5. **Clamp the center** so the `crop_size × crop_size` window stays
+   in bounds:
+   `cx = int(np.clip(cx, half, W - half - 1))`,
+   `cy = int(np.clip(cy, half, H - half - 1))`,
+   where `half = crop_size // 2`. The crop is always a real
+   `crop_size × crop_size` region of the source frame.
+6. Crop the window: `image_crop = frame[y0:y0+crop_size, x0:x0+crop_size]`
+   and `mask_crop = mask_classes[y0:y0+crop_size, x0:x0+crop_size]`.
+   The window equals `crop_size`, so **no resize is needed**. The
+   old `window → crop_size` scaling is gone.
+
+**`find_bee_components` stays** — but only as a min-area gate
+(answers "which components are real bees?", used at `__init__`
+filtering). It no longer drives the *center* of the crop. Two
+roles, two helpers, clean separation.
+
+**Per-call, seeded by epoch.** Add
+`def set_epoch(self, epoch: int) -> None: self._epoch = epoch`
+to `BeeCropDataset`. The center-sampling RNG is
+`np.random.default_rng(seed + idx + 2 + self._epoch)`, a
+separate stream from the existing component-picking
+(`seed + idx`) and swap-decision (`seed + idx + 1`) streams.
+Same frame yields different crops across epochs (data
+augmentation); the same `__getitem__` call is reproducible
+within an epoch.
+
+**Implement the EDT sampling as a pure helper** in
+`src/engine/bee_crop.py`:
+
+```python
+def sample_center_from_distance_transform(
+    mask: np.ndarray, rng: np.random.Generator, crop_size: int
+) -> tuple[int, int]:
+    """Return (cy, cx) sampled with probability ∝ EDT(mask >= 1)."""
+    foreground = (mask >= 1).astype(np.uint8)
+    edt = cv2.distanceTransform(foreground, cv2.DIST_L2, 5)
+    flat = edt.ravel()
+    total = float(flat.sum())
+    if total <= 0:
+        raise ValueError(
+            "mask has no foreground — caller should have filtered"
+        )
+    choice = rng.choice(flat.size, p=flat / total)
+    cy, cx = np.unravel_index(choice, edt.shape)
+    H, W = foreground.shape
+    half = crop_size // 2
+    if half <= 0 or 2 * half > W or 2 * half > H:
+        raise ValueError(f"crop_size={crop_size} does not fit in {(H, W)}")
+    cx = int(np.clip(cx, half, W - half - 1))
+    cy = int(np.clip(cy, half, H - half - 1))
+    return cy, cx
+```
+
+The helper is easy to unit-test:
+- Stub a known mask (e.g. 32×32 with a 10×10 foreground square in
+  the centre), run with a fixed seed, assert the result is inside
+  the post-clamp range.
+- An empty mask raises `ValueError` ("no foreground").
+- An over-large `crop_size` raises `ValueError`.
+
+In `__getitem__`, replace the existing bbox-centering block with
+a call to this helper. The downstream code (mask class
+conversion, optional swap, transform, return) is unchanged.
+
+#### Verify
+
+```python
+from engine.dataset import BeeCropDataset
+ds = BeeCropDataset("data/frames", crop_size=128)
+print(len(ds))                              # > 0
+ds.set_epoch(0)
+item_a = ds[0]
+ds.set_epoch(1)
+item_b = ds[0]
+assert (item_a["mask"] == 2).sum() > 0      # foreground present
+assert (item_b["mask"] == 2).sum() > 0
+# item_a and item_b are different crops of the same frame
+# (different epochs → different center samples)
+```
+
+(If `item_a == item_b` happens to be true on this particular frame
+and these particular epochs, bump `crop_size=64` or try a different
+frame — don't tune the seed to dodge it. If the collision is
+reproducible across many frames/seeds, the algorithm has a bug.)
+
 ---
 
 ## Step 4 — Smoke-test script (stricter, no fallback)
@@ -449,8 +572,11 @@ changes:
 ### 4c. Per-sample checks (replace the existing ones where noted)
 
 Keep:
-- **Centering** (unchanged): foreground centroid in
-  `[0.2, 0.8] * crop_size` on both axes.
+- **Centering** (tightened): foreground centroid in
+  `[0.4, 0.6] * crop_size` on both axes. By construction (we
+  sample at the EDT peak), the bee's centroid should be near
+  the crop centre. If a sample drifts outside, the EDT is
+  sampling off-target — fix the algorithm, not the threshold.
 - **Coverage** (unchanged): foreground area in `[0.02, 0.60] * total`.
 - **Luminance** (unchanged): mean luma `>= 5/255`.
 - **Swap diff** (unchanged): for `swapped=True` samples, per-pixel mean
@@ -505,9 +631,11 @@ list is bad, etc.) and fix it.
 - `pyproject.toml` — `pytest` is already in `[dependency-groups].dev`
   and `[tool.pytest.ini_options]` has `pythonpath = ["src"]`. No
   changes.
-- `tests/test_bee_crop.py` — already passing, no changes.
-- `tests/test_dataset.py` — add one new test (see below). Do not touch
-  the existing ones unless they reference the removed
+- `tests/test_bee_crop.py` — add one new test for
+  `sample_center_from_distance_transform` (see below). Do not touch
+  the existing tests.
+- `tests/test_dataset.py` — add two new tests (see below). Do not
+  touch the existing ones unless they reference the removed
   `_no_bee_sample` (they do not — the current tests only touch the
   happy path with foreground).
 
@@ -526,13 +654,54 @@ def test_no_bee_filtered_at_init(tmp_path: object) -> None:
 Reuse the existing `_write_sample` fixture (it already takes an `fg`
 flag). If the helper needs a small tweak to honour `fg=False`, do it.
 
+### New test in `tests/test_bee_crop.py`
+
+```python
+def test_sample_center_from_distance_transform() -> None:
+    """Center is sampled at the EDT peak and clamped to valid bounds."""
+    from engine.bee_crop import sample_center_from_distance_transform
+    # 32x32 mask with a 10x10 foreground square in the centre
+    mask = np.zeros((32, 32), dtype=np.uint8)
+    mask[11:21, 11:21] = 1
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        cy, cx = sample_center_from_distance_transform(mask, rng, crop_size=8)
+        # post-clamp: half=4, so cy in [4, 27] and cx in [4, 27]
+        assert 4 <= cy < 28
+        assert 4 <= cx < 28
+    # No-foreground mask raises
+    empty = np.zeros((32, 32), dtype=np.uint8)
+    with pytest.raises(ValueError):
+        sample_center_from_distance_transform(empty, rng, crop_size=8)
+    # Over-large crop_size raises
+    small = np.zeros((16, 16), dtype=np.uint8)
+    small[7:9, 7:9] = 1
+    with pytest.raises(ValueError):
+        sample_center_from_distance_transform(small, rng, crop_size=32)
+```
+
+### Second new test in `tests/test_dataset.py`
+
+```python
+def test_set_epoch_changes_crop(tmp_path: object) -> None:
+    """Different epochs sample different centers from the EDT."""
+    _write_sample(tmp_path, "vid_a", "frame_with_bee", fg=True)
+    ds = BeeCropDataset(str(tmp_path), crop_size=64)
+    ds.set_epoch(0)
+    a = ds[0]
+    ds.set_epoch(1)
+    b = ds[0]
+    # Same frame, different epochs → different center samples
+    assert not (a["image"] == b["image"]).all()
+```
+
 ### Verify
 
 ```bash
 uv run pytest
 ```
 
-All tests pass (the previous 8 + this new one = 9), exit code `0`.
+All tests pass (the previous 8 + 3 new ones = 11), exit code `0`.
 
 ---
 
@@ -591,7 +760,15 @@ Inspect:
 1. `samples/bees/contact_sheet.jpg` — 4×4 of the final crops. This
    time, the centre of every tile must be a recognizable bee (or
    bee-like cluster) on a sharp hive background. No all-black tile.
-   No full-hive-with-bees-in-the-corner tile.
+   No full-hive-with-bees-in-the-corner tile. **Apparent bee size
+   may vary across tiles** (close vs. far from camera, different
+   lens zoom) — that's data variation, not a bug, and it is
+   exactly what the EDT-driven center sampling is meant to
+   preserve: a fixed `crop_size × crop_size` window centred on the
+   density peak, with the bee's apparent size left to the source
+   data. What must be **uniform** is centering (bee near the
+   middle of the tile) and background sharpness (no blurry
+   low-detail washes).
 2. `samples/bees/compare.jpg` — per-sample `original | mask | swapped`.
    The mask column must be a small white shape in the centre of the
    crop on every row. The right column (swapped) must be a different
