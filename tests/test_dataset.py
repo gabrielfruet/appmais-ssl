@@ -24,7 +24,9 @@ def _write_sample(
         img[30:70, 30:70] = (0, 0, 255)
     cv2.imwrite(str(vdir / f"{frame_stem}.jpg"), img)
     cv2.imwrite(str(vdir / f"{frame_stem}_mask.png"), mask)
-    cv2.imwrite(str(vdir / "background.png"), np.full((100, 100, 3), 50, dtype=np.uint8))
+    cv2.imwrite(
+        str(vdir / "background.png"), np.full((100, 100, 3), 50, dtype=np.uint8)
+    )
     return str(vdir / f"{frame_stem}.jpg"), str(vdir / f"{frame_stem}_mask.png")
 
 

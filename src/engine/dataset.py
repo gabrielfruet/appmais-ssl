@@ -217,10 +217,16 @@ class BeeCropDataset(Dataset[dict[str, object]]):
         window_w = window_x2 - window_x1
         window_h = window_y2 - window_y1
 
-        do_swap = self._swap_probability > 0.0 and rng.random() < self._swap_probability
+        # Use a separate RNG for the swap decision so the component-picking
+        # RNG state is independent of swap behavior. This lets external code
+        # reproduce the same component pick by seeding with the same value.
+        swap_rng = np.random.default_rng(self._seed + int(idx) + 1)
+        do_swap = (
+            self._swap_probability > 0.0 and swap_rng.random() < self._swap_probability
+        )
 
         if do_swap:
-            background_path = self._choose_background(sample.video_id, rng)
+            background_path = self._choose_background(sample.video_id, swap_rng)
             background = _load_background(background_path, frame_shape=(height, width))
             image_rgb, mask_resized = build_swapped_crop(
                 image=_bgr_to_rgb(frame_bgr),

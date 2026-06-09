@@ -1,6 +1,5 @@
 """Tests for the pure helpers in engine.bee_crop."""
 
-import cv2
 import numpy as np
 
 from engine.bee_crop import (
