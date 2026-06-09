@@ -22,12 +22,13 @@ Useful options:
 - `--max-frames-per-video 200`: cap saved frames per video.
 - `--skip-start-seconds 5.0`: ignore the first N seconds of each video before exporting frames.
 - `--foreground-masks`: save a MOG2 foreground mask beside each exported frame.
+- `--save-background`: after the MOG2 loop finishes, write the learned background image to `<video_output_dir>/background.png` as a BGR PNG. The image is saved at MOG2's downsampled size (default 320px wide). Requires `--foreground-masks`; ignored otherwise. Re-runs require `--overwrite` to refresh the file.
 - `--mog2-history 500`: number of frames used by MOG2 to model the background.
 - `--mog2-var-threshold 4.0`: MOG2 variance threshold; lower values make foreground detection more sensitive.
 - `--mog2-downsample-width 320`: run MOG2 on blurred frames downsampled to this width, then resize masks back to the exported frame size.
 - `--overwrite`: delete existing JPG frames and foreground masks for a video and regenerate them.
 
-Foreground masks are saved as PNG files with the same stem as each JPG plus `_mask`, for example `frame_000001_t000000.0s_mask.png`. Mask pixels use `0` for background, `127` for shadow, and `255` for foreground.
+Foreground masks are saved as PNG files with the same stem as each JPG plus `_mask`, for example `frame_000001_t000000.0s_mask.png`. Mask pixels use `0` for background, `127` for shadow, and `255` for foreground. When `--save-background` is also passed, a `background.png` is written to the same video directory.
 
 ```bash
 uv run python scripts/extract_video_frames.py data/videos_raw data/frames --foreground-masks

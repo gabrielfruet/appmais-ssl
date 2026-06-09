@@ -130,6 +130,28 @@ def should_save_frame(
     return enough_gap and different_enough, signature
 
 
+def output_path_for_background(video_output_dir: Path) -> Path:
+    return video_output_dir / "background.png"
+
+
+def save_background_image(
+    video_path: Path,
+    video_output_dir: Path,
+    background_subtractor: cv2.BackgroundSubtractor,
+) -> None:
+    background = background_subtractor.getBackgroundImage()
+    if background is None:
+        return
+    background_path = output_path_for_background(video_output_dir)
+    background_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(background_path), background)
+    if not ok:
+        raise click.ClickException(
+            f"Could not write background image: {background_path}"
+        )
+    click.echo(f"{video_path.name}: saved background to {background_path}")
+
+
 def extract_frames(
     video_path: Path,
     output_dir: Path,
@@ -141,6 +163,7 @@ def extract_frames(
     skip_start_seconds: float,
     overwrite: bool,
     foreground_masks: bool,
+    save_background: bool,
     mog2_history: int,
     mog2_var_threshold: float,
     mog2_downsample_width: int,
@@ -148,6 +171,7 @@ def extract_frames(
     video_output_dir = output_dir_for_video(output_dir, video_path)
     existing_frames = sorted(video_output_dir.glob("*.jpg"))
     existing_masks = sorted(video_output_dir.glob("*_mask.png"))
+    existing_background = output_path_for_background(video_output_dir)
     if existing_frames and not overwrite:
         click.echo(
             f"{video_path.name}: skipped, found {len(existing_frames)} "
@@ -158,6 +182,8 @@ def extract_frames(
     if overwrite:
         for output_path in [*existing_frames, *existing_masks]:
             output_path.unlink()
+        if existing_background.exists():
+            existing_background.unlink()
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -242,6 +268,10 @@ def extract_frames(
                 last_saved_signature = signature
                 last_saved_time = timestamp_seconds
             progress.close()
+            if save_background:
+                save_background_image(
+                    video_path, video_output_dir, background_subtractor
+                )
         else:
             progress = tqdm(
                 range(candidate_count),
@@ -358,6 +388,16 @@ def extract_frames(
     ),
 )
 @click.option(
+    "--save-background",
+    is_flag=True,
+    help=(
+        "After the MOG2 loop finishes, write the learned background image "
+        "to <video_output_dir>/background.png as a BGR PNG. The image is "
+        "saved at MOG2's downsampled size. Requires --foreground-masks; "
+        "ignored otherwise."
+    ),
+)
+@click.option(
     "--mog2-history",
     type=int,
     default=500,
@@ -392,6 +432,7 @@ def main(
     skip_start_seconds: float,
     overwrite: bool,
     foreground_masks: bool,
+    save_background: bool,
     mog2_history: int,
     mog2_var_threshold: float,
     mog2_downsample_width: int,
@@ -412,6 +453,9 @@ def main(
         raise click.ClickException("--mog2-var-threshold must be positive")
     if mog2_downsample_width <= 0:
         raise click.ClickException("--mog2-downsample-width must be positive")
+    if save_background and not foreground_masks:
+        click.echo("--save-background requires --foreground-masks; ignoring.")
+        save_background = False
 
     videos = find_videos(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -429,6 +473,7 @@ def main(
             skip_start_seconds=skip_start_seconds,
             overwrite=overwrite,
             foreground_masks=foreground_masks,
+            save_background=save_background,
             mog2_history=mog2_history,
             mog2_var_threshold=mog2_var_threshold,
             mog2_downsample_width=mog2_downsample_width,
