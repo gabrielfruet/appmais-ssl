@@ -27,6 +27,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "basedpyright>=1.39.6",
+    "pytest>=8.0",
     "ruff>=0.15.15",
 ]
 
@@ -43,3 +44,6 @@ exclude = [".venv", "data"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
