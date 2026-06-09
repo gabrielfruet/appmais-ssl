@@ -3,6 +3,8 @@
 Usage:
     python scripts/extract_video_frames.py input.mp4 output/frames
     python scripts/extract_video_frames.py data/videos_raw output/frames
+    python scripts/extract_video_frames.py data/videos_raw output/frames \\
+        --videos-file data/curated_videos.txt
 """
 
 from pathlib import Path
@@ -11,6 +13,8 @@ import click
 import cv2
 import numpy as np
 from tqdm import tqdm
+
+from engine.bee_crop import find_bee_components
 
 VIDEO_EXTENSIONS = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 THUMBNAIL_SIZE = (64, 64)
@@ -29,6 +33,28 @@ def find_videos(input_path: Path) -> list[Path]:
     if not videos:
         raise click.ClickException(f"No videos found in {input_path}")
     return videos
+
+
+def parse_videos_file(path: Path) -> list[Path]:
+    """Parse a text file with one video path per line into absolute Paths.
+
+    Lines starting with ``#`` and empty lines are ignored. Each kept
+    line must resolve to an existing video file.
+    """
+    parsed: list[Path] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        candidate = Path(stripped).expanduser().resolve()
+        if not candidate.exists():
+            raise click.ClickException(f"Video listed in {path} not found: {candidate}")
+        if candidate.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise click.ClickException(
+                f"Video listed in {path} is not a video file: {candidate}"
+            )
+        parsed.append(candidate)
+    return parsed
 
 
 def frame_signature(frame: np.ndarray) -> np.ndarray:
@@ -138,10 +164,20 @@ def save_background_image(
     video_path: Path,
     video_output_dir: Path,
     background_subtractor: cv2.BackgroundSubtractor,
+    original_frame_shape: tuple[int, int] | None = None,
 ) -> None:
     background = background_subtractor.getBackgroundImage()
     if background is None:
         return
+    if (
+        original_frame_shape is not None
+        and background.shape[:2] != original_frame_shape
+    ):
+        background = cv2.resize(
+            background,
+            (original_frame_shape[1], original_frame_shape[0]),
+            interpolation=cv2.INTER_CUBIC,
+        )
     background_path = output_path_for_background(video_output_dir)
     background_path.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(background_path), background)
@@ -149,7 +185,10 @@ def save_background_image(
         raise click.ClickException(
             f"Could not write background image: {background_path}"
         )
-    click.echo(f"{video_path.name}: saved background to {background_path}")
+    click.echo(
+        f"{video_path.name}: saved background "
+        f"({background.shape[1]}x{background.shape[0]}) to {background_path}"
+    )
 
 
 def extract_frames(
@@ -167,6 +206,7 @@ def extract_frames(
     mog2_history: int,
     mog2_var_threshold: float,
     mog2_downsample_width: int,
+    min_bee_area: int = 50,
 ) -> int:
     video_output_dir = output_dir_for_video(output_dir, video_path)
     existing_frames = sorted(video_output_dir.glob("*.jpg"))
@@ -209,6 +249,8 @@ def extract_frames(
         last_saved_time = -min_gap_seconds
         saved_count = 0
         sampled_count = 0
+        skipped_no_bee = 0
+        original_frame_shape: tuple[int, int] | None = None
 
         if foreground_masks:
             background_subtractor = cv2.createBackgroundSubtractorMOG2(
@@ -230,6 +272,8 @@ def extract_frames(
                     break
 
                 timestamp_seconds = frame_index / fps
+                if original_frame_shape is None:
+                    original_frame_shape = frame.shape[:2]
                 mog2_frame = preprocess_for_mog2(frame, mog2_downsample_width)
                 raw_mask = background_subtractor.apply(mog2_frame)
                 frame_index += 1
@@ -252,6 +296,11 @@ def extract_frames(
                 if not should_save:
                     continue
 
+                full_mask = resize_mask_to_frame(normalize_mog2_mask(raw_mask), frame)
+                if not find_bee_components(full_mask, min_area=min_bee_area):
+                    skipped_no_bee += 1
+                    continue
+
                 saved_count += 1
                 frame_path = output_path_for_frame(
                     output_dir, video_path, saved_count, timestamp_seconds
@@ -260,9 +309,7 @@ def extract_frames(
                     frame_path=frame_path,
                     frame=frame,
                     jpeg_quality=jpeg_quality,
-                    foreground_mask=resize_mask_to_frame(
-                        normalize_mog2_mask(raw_mask), frame
-                    ),
+                    foreground_mask=full_mask,
                 )
 
                 last_saved_signature = signature
@@ -270,7 +317,10 @@ def extract_frames(
             progress.close()
             if save_background:
                 save_background_image(
-                    video_path, video_output_dir, background_subtractor
+                    video_path,
+                    video_output_dir,
+                    background_subtractor,
+                    original_frame_shape=original_frame_shape,
                 )
         else:
             progress = tqdm(
@@ -318,8 +368,8 @@ def extract_frames(
                 last_saved_time = timestamp_seconds
 
         click.echo(
-            f"{video_path.name}: sampled {sampled_count}, saved {saved_count} "
-            f"to {video_output_dir}"
+            f"{video_path.name}: sampled {sampled_count}, saved {saved_count}, "
+            f"skipped {skipped_no_bee} no-bee to {video_output_dir}"
         )
         return saved_count
     finally:
@@ -329,6 +379,28 @@ def extract_frames(
 @click.command()
 @click.argument("input_path", type=click.Path(exists=True, path_type=Path))
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--videos-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Optional path to a text file with one video path per line. "
+        "If given, only these videos are processed. Lines starting "
+        "with '#' are ignored. When set, this overrides the videos "
+        "discovered under INPUT_PATH."
+    ),
+)
+@click.option(
+    "--min-bee-area",
+    type=int,
+    default=50,
+    show_default=True,
+    help=(
+        "Minimum foreground component area (in pixels) for a frame to "
+        "be saved. Frames with no bee component of at least this size "
+        "are skipped. Requires --foreground-masks; ignored otherwise."
+    ),
+)
 @click.option(
     "--sample-every-seconds",
     type=float,
@@ -393,8 +465,9 @@ def extract_frames(
     help=(
         "After the MOG2 loop finishes, write the learned background image "
         "to <video_output_dir>/background.png as a BGR PNG. The image is "
-        "saved at MOG2's downsampled size. Requires --foreground-masks; "
-        "ignored otherwise."
+        "upscaled with INTER_CUBIC to the full frame resolution (e.g. "
+        "640x480), so consumers can paste bee crops onto a sharp scene. "
+        "Requires --foreground-masks; ignored otherwise."
     ),
 )
 @click.option(
@@ -436,6 +509,8 @@ def main(
     mog2_history: int,
     mog2_var_threshold: float,
     mog2_downsample_width: int,
+    videos_file: Path | None = None,
+    min_bee_area: int = 50,
 ) -> None:
     if sample_every_seconds <= 0.0:
         raise click.ClickException("--sample-every-seconds must be positive")
@@ -453,11 +528,16 @@ def main(
         raise click.ClickException("--mog2-var-threshold must be positive")
     if mog2_downsample_width <= 0:
         raise click.ClickException("--mog2-downsample-width must be positive")
+    if min_bee_area <= 0:
+        raise click.ClickException("--min-bee-area must be positive")
     if save_background and not foreground_masks:
         click.echo("--save-background requires --foreground-masks; ignoring.")
         save_background = False
 
-    videos = find_videos(input_path)
+    if videos_file is not None:
+        videos = parse_videos_file(videos_file)
+    else:
+        videos = find_videos(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     total_saved = 0
@@ -477,6 +557,7 @@ def main(
             mog2_history=mog2_history,
             mog2_var_threshold=mog2_var_threshold,
             mog2_downsample_width=mog2_downsample_width,
+            min_bee_area=min_bee_area,
         )
 
     click.echo(f"Saved {total_saved} frames from {len(videos)} video(s).")
