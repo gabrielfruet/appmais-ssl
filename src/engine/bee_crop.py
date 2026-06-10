@@ -85,10 +85,16 @@ def build_swapped_crop(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Cut-paste a bee crop onto a different background.
 
-    ``image`` and ``background`` are interpreted in the same (H, W)
-    coordinate system; ``background`` is resized to the frame size if
-    needed. The window is allowed to extend past image bounds; both
-    crops are aligned by cropping at the same window in both scenes.
+    All inputs (``image`` and ``background``) are RGB uint8. ``mask``
+    is the MOG2 grayscale mask using values {0, 127, 255} (background,
+    shadow halo, foreground). The in-bee region is ``mask >= 127``
+    (shadow + foreground), so the bee comes with its natural shadow
+    halo from the source frame and the cut-out edge is naturally
+    feathered. ``image`` and ``background`` are interpreted in the
+    same (H, W) coordinate system; ``background`` is resized to the
+    frame size if needed. The window is allowed to extend past image
+    bounds; both crops are aligned by cropping at the same window in
+    both scenes.
     """
     height, width = image.shape[:2]
     if background.shape[:2] != (height, width):

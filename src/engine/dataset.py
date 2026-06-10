@@ -116,6 +116,14 @@ def _bgr_to_rgb(image: np.ndarray) -> np.ndarray:
 
 
 def _load_background(path: Path, frame_shape: tuple[int, int]) -> np.ndarray:
+    """Load a background image and return it as RGB uint8.
+
+    The dataset's color contract is RGB throughout: the source frame
+    is converted from BGR to RGB in ``_build_crop``, so the background
+    must be RGB here too. Otherwise the cut-paste mixes channels and
+    the swapped crop ends up with a blue/peach cast. Resizes to the
+    frame shape if needed.
+    """
     background = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if background is None:
         raise ValueError(f"Could not read background image: {path}")
@@ -124,7 +132,7 @@ def _load_background(path: Path, frame_shape: tuple[int, int]) -> np.ndarray:
         background = cv2.resize(
             background, (width, height), interpolation=cv2.INTER_AREA
         )
-    return background
+    return cv2.cvtColor(background, cv2.COLOR_BGR2RGB)
 
 
 class BeeCropDataset(Dataset[dict[str, object]]):

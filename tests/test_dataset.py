@@ -146,12 +146,32 @@ def test_assemble_output_builds_tensors(tmp_path: object) -> None:
     assert output["mask"].shape == (64, 64)
 
 
-def test_load_background_returns_bgr_for_now(tmp_path: object) -> None:
-    """Step 1 keeps the existing background color contract unchanged."""
+def test_load_background_returns_rgb(tmp_path: object) -> None:
+    """`_load_background` returns RGB, not BGR (BGR/RGB mismatch fix)."""
     path = pathlib.Path(str(tmp_path)) / "bg.png"
+    # BGR red: B=0, G=0, R=255 in the file; after cvtColor the same pixels
+    # should appear as RGB red, with R=255 in the R-channel slot.
     red_bgr = np.zeros((10, 10, 3), dtype=np.uint8)
     red_bgr[:, :, 2] = 255
     cv2.imwrite(str(path), red_bgr)
     loaded = _load_background(path, frame_shape=(10, 10))
-    assert int(loaded[:, :, 0].mean()) == 0
-    assert int(loaded[:, :, 2].mean()) == 255
+    assert int(loaded[:, :, 0].mean()) == 255, (
+        f"R channel mean is {loaded[:, :, 0].mean()}, expected 255 (BGR/RGB mismatch?)"
+    )
+    assert int(loaded[:, :, 2].mean()) == 0
+
+
+def test_swap_output_is_rgb(tmp_path: object) -> None:
+    """End-to-end swap yields an RGB image tensor (foreground R > B)."""
+    for video in ("vid_a", "vid_b"):
+        _write_sample(tmp_path, video, "frame_with_bee", fg=True)
+    ds = BeeCropDataset(str(tmp_path), crop_size=64, swap_background_prob=1.0)
+    item = ds[0]
+    image = item["image"]
+    # The source frame is BGR-red in the bee region (img[fg] = (0, 0, 255)).
+    # In RGB that is R=1.0, B=0.0; the mean R channel should exceed the mean
+    # B channel for a swap-correct dataset.
+    assert float(image[0].mean()) > float(image[2].mean()), (
+        f"R mean {image[0].mean()} not > B mean {image[2].mean()} — "
+        "swap likely still uses BGR background"
+    )
