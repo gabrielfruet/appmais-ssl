@@ -141,7 +141,7 @@ class BeeCropDataset(Dataset[dict[str, object]]):
     def __init__(
         self,
         root: str | Path,
-        crop_size: int = 224,
+        crop_size: int = 128,
         min_area: int = 50,
         swap_background_prob: float = 0.5,
         background_pool: Sequence[str | Path] | None = None,

@@ -23,7 +23,7 @@ from engine.bee_crop import (
 )
 from engine.dataset import BeeCropDataset
 
-CROP_SIZE = 224
+CROP_SIZE = 128
 SWAP_PROBABILITY = 0.5
 SEED = 0
 THUMB_SIZE = 224
@@ -372,14 +372,24 @@ def _build_sheets(
     type=click.Path(file_okay=False, path_type=Path),
     default=Path("samples/bees"),
 )
-def main(root: Path, num_samples: int, output: Path) -> None:
+@click.option(
+    "--crop-size",
+    type=int,
+    default=CROP_SIZE,
+    show_default=True,
+    help="Bee crop size in pixels. The contact sheet's tile size is "
+    "THUMB_SIZE, independent of this.",
+)
+def main(root: Path, num_samples: int, output: Path, crop_size: int) -> None:
     if num_samples <= 0:
         raise click.ClickException("--num-samples must be positive")
+    if crop_size <= 0:
+        raise click.ClickException("--crop-size must be positive")
 
     output.mkdir(parents=True, exist_ok=True)
     dataset = BeeCropDataset(
         root=root,
-        crop_size=CROP_SIZE,
+        crop_size=crop_size,
         swap_background_prob=SWAP_PROBABILITY,
         seed=SEED,
     )
@@ -398,7 +408,7 @@ def main(root: Path, num_samples: int, output: Path) -> None:
         num_samples=num_samples,
         failures=failures,
         output_dir=output,
-        crop_size=CROP_SIZE,
+        crop_size=crop_size,
         seed=SEED,
     )
     swapped_count = sum(result.swapped for result in results)
