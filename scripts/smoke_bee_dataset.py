@@ -1,5 +1,11 @@
 """Smoke-test the BeeCropDataset and save sample outputs.
 
+Quantitative sanity checks (pre-flight + per-sample checks + the
+``compare.jpg`` montage) run on the primary seed only. The other
+contact-sheet seeds are visual aids: they iterate the dataset with a
+different RNG seed so the population-level swap behaviour is visible
+across multiple draws.
+
 Usage:
     uv run python scripts/smoke_bee_dataset.py data/frames \\
         --num-samples 16 --output samples/bees
@@ -25,7 +31,7 @@ from engine.dataset import BeeCropDataset
 
 CROP_SIZE = 128
 SWAP_PROBABILITY = 0.5
-SEED = 0
+CONTACT_SHEET_SEEDS: tuple[int, ...] = (0, 1, 2)
 THUMB_SIZE = 224
 GUTTER = 4
 LUMINANCE_FLOOR = 5.0
@@ -303,6 +309,7 @@ def _collect_samples(
     output_dir: Path,
     crop_size: int,
     seed: int,
+    save_samples: bool = True,
 ) -> list[_SampleResult]:
     results: list[_SampleResult] = []
     num_to_show = min(num_samples, len(dataset))
@@ -330,15 +337,16 @@ def _collect_samples(
             swapped=swapped,
         )
         _check_sample(result, failures, crop_size)
-        _save_sample_files(output_dir, result)
+        if save_samples:
+            _save_sample_files(output_dir, result)
         results.append(result)
     return results
 
 
-def _build_sheets(
-    results: list[_SampleResult], output_dir: Path, seeds: list[int]
+def _build_contact_sheet(
+    results: Sequence[_SampleResult], output_dir: Path, seed: int
 ) -> None:
-    _ = seeds
+    """Write ``contact_sheet_<seed>.jpg`` from ``results`` (pure I/O)."""
     swapped_rgbs = [result.image_rgb for result in results]
     saved_swapped = [result.image_rgb for result in results if result.swapped]
     if saved_swapped:
@@ -346,12 +354,17 @@ def _build_sheets(
             saved_swapped, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
         )
     else:
-        click.echo("No swapped samples; contact sheet uses unswapped crops.")
+        click.echo(
+            f"seed={seed}: no swapped samples; contact sheet uses unswapped crops."
+        )
         contact_sheet = _make_montage(
             swapped_rgbs, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
         )
-    _save_uint8(output_dir / "contact_sheet.jpg", contact_sheet)
+    _save_uint8(output_dir / f"contact_sheet_{seed}.jpg", contact_sheet)
 
+
+def _build_compare_sheet(results: Sequence[_SampleResult], output_dir: Path) -> None:
+    """Write ``compare.jpg`` from the primary seed's results (pure I/O)."""
     compare_tiles: list[np.ndarray] = []
     for result in results:
         mask_vis = np.stack([result.mask_classes.astype(np.uint8) * 127] * 3, axis=-1)
@@ -380,46 +393,95 @@ def _build_sheets(
     help="Bee crop size in pixels. The contact sheet's tile size is "
     "THUMB_SIZE, independent of this.",
 )
-def main(root: Path, num_samples: int, output: Path, crop_size: int) -> None:
+@click.option(
+    "--seeds",
+    type=str,
+    default=",".join(str(s) for s in CONTACT_SHEET_SEEDS),
+    show_default=True,
+    help="Comma-separated list of seeds for the contact sheets. The "
+    "first seed is the primary run (quantitative checks + "
+    "compare.jpg); the rest are visual aids.",
+)
+def main(
+    root: Path, num_samples: int, output: Path, crop_size: int, seeds: str
+) -> None:
     if num_samples <= 0:
         raise click.ClickException("--num-samples must be positive")
     if crop_size <= 0:
         raise click.ClickException("--crop-size must be positive")
 
+    seen: set[int] = set()
+    seed_list: list[int] = []
+    for piece in seeds.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        value = int(piece)
+        if value in seen:
+            continue
+        seen.add(value)
+        seed_list.append(value)
+    if not seed_list:
+        raise click.ClickException("--seeds must list at least one integer")
+
+    primary_seed = seed_list[0]
     output.mkdir(parents=True, exist_ok=True)
-    dataset = BeeCropDataset(
+    primary_dataset = BeeCropDataset(
         root=root,
         crop_size=crop_size,
         swap_background_prob=SWAP_PROBABILITY,
-        seed=SEED,
+        seed=primary_seed,
     )
 
     failures: list[str] = []
-    _run_preflight(dataset, num_samples, failures)
+    _run_preflight(primary_dataset, num_samples, failures)
 
-    num_to_show = min(num_samples, len(dataset))
-    pool_size = len(dataset.background_pool)
+    num_to_show = min(num_samples, len(primary_dataset))
+    pool_size = len(primary_dataset.background_pool)
     click.echo(
-        f"Dataset size: {len(dataset)}, showing {num_to_show}, pool size: {pool_size}"
+        f"Dataset size: {len(primary_dataset)}, showing {num_to_show}, "
+        f"pool size: {pool_size}, seeds: {seed_list}"
     )
 
-    results = _collect_samples(
-        dataset=dataset,
+    primary_results = _collect_samples(
+        dataset=primary_dataset,
         num_samples=num_samples,
         failures=failures,
         output_dir=output,
         crop_size=crop_size,
-        seed=SEED,
+        seed=primary_seed,
+        save_samples=True,
     )
-    swapped_count = sum(result.swapped for result in results)
-    swap_ratio = swapped_count / max(1, len(results))
+    swapped_count = sum(result.swapped for result in primary_results)
+    swap_ratio = swapped_count / max(1, len(primary_results))
     if pool_size >= 2 and not (SWAP_RATIO_LOW <= swap_ratio <= SWAP_RATIO_HIGH):
         click.echo(
             f"WARNING: swap ratio {swap_ratio:.2f} outside "
             f"[{SWAP_RATIO_LOW}, {SWAP_RATIO_HIGH}] (pool size {pool_size})"
         )
 
-    _build_sheets(results, output, seeds=[SEED])
+    for seed in seed_list:
+        if seed == primary_seed:
+            sheet_results = primary_results
+        else:
+            other = BeeCropDataset(
+                root=root,
+                crop_size=crop_size,
+                swap_background_prob=SWAP_PROBABILITY,
+                seed=seed,
+            )
+            sheet_results = _collect_samples(
+                dataset=other,
+                num_samples=num_samples,
+                failures=[],
+                output_dir=output,
+                crop_size=crop_size,
+                seed=seed,
+                save_samples=False,
+            )
+        _build_contact_sheet(sheet_results, output, seed)
+
+    _build_compare_sheet(primary_results, output)
     click.echo(f"Items: {num_to_show}, swapped: {swapped_count}")
 
     if failures:
