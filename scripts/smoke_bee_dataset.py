@@ -375,17 +375,21 @@ def _build_contact_sheet(
     swapped_rgbs = [result.image_rgb for result in results]
     saved_swapped = [result.image_rgb for result in results if result.swapped]
     if saved_swapped:
-        contact_sheet = _make_montage(
+        contact_sheet_rgb = _make_montage(
             saved_swapped, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
         )
     else:
         click.echo(
             f"seed={seed}: no swapped samples; contact sheet uses unswapped crops."
         )
-        contact_sheet = _make_montage(
+        contact_sheet_rgb = _make_montage(
             swapped_rgbs, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
         )
-    _save_uint8(output_dir / f"contact_sheet_{seed}.jpg", contact_sheet)
+    # Montage is built from RGB tiles; cv2.imwrite expects BGR.
+    _save_uint8(
+        output_dir / f"contact_sheet_{seed}.jpg",
+        cv2.cvtColor(contact_sheet_rgb, cv2.COLOR_RGB2BGR),
+    )
 
 
 def _build_compare_sheet(results: Sequence[_SampleResult], output_dir: Path) -> None:
@@ -394,10 +398,14 @@ def _build_compare_sheet(results: Sequence[_SampleResult], output_dir: Path) -> 
     for result in results:
         mask_vis = np.stack([result.mask_classes.astype(np.uint8) * 127] * 3, axis=-1)
         compare_tiles.extend([result.original_rgb, mask_vis, result.image_rgb])
-    compare_sheet = _make_montage(
+    compare_sheet_rgb = _make_montage(
         compare_tiles, cols=3, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
     )
-    _save_uint8(output_dir / "compare.jpg", compare_sheet)
+    # Montage is built from RGB tiles; cv2.imwrite expects BGR.
+    _save_uint8(
+        output_dir / "compare.jpg",
+        cv2.cvtColor(compare_sheet_rgb, cv2.COLOR_RGB2BGR),
+    )
 
 
 @click.command()
