@@ -86,25 +86,32 @@ If matching `_mask.png` files exist, the script overlays them by default: shadow
 
 ## `scripts/smoke_bee_dataset.py`
 
-Smoke-tests `engine.dataset.BeeCropDataset` by iterating N samples, saving per-sample original/mask/swapped crops, and building two montages for visual inspection.
+Smoke-tests `engine.dataset.BeeCropDataset` by iterating N samples, saving per-sample original/mask/swapped crops, and building contact sheets plus a per-sample compare montage for visual inspection.
 
 ```bash
 uv run python scripts/smoke_bee_dataset.py data/frames \
     --num-samples 16 --output samples/bees
 ```
 
-Defaults: `ROOT=data/frames`, `num_samples=16`, `output=samples/bees`. The script instantiates the dataset with `crop_size=224` and `swap_background_prob=0.5`, then for each item saves:
+Defaults: `ROOT=data/frames`, `num_samples=16`, `output=samples/bees`, `crop_size=128`, `seeds="0,1,2"`. The script instantiates the dataset with `crop_size=128` and `swap_background_prob=0.5`, then for each item saves:
 
 - `sample_<idx:03d>_original.jpg` — the unswapped crop at the same window.
 - `sample_<idx:03d>_mask.png` — the mask with class 0/1/2 scaled by 127.
 - `sample_<idx:03d>{_swapped}.jpg` — the final (possibly swapped) crop; the `_swapped` suffix is added when the background was actually swapped.
 
-It also writes two montages:
+It also writes the following montages:
 
-- `contact_sheet.jpg` — 4×4 grid of the swapped crops.
-- `compare.jpg` — 3-column montage (`original | mask | swapped`), one row per sample.
+- `contact_sheet_<seed>.jpg` — 4×4 grid of swapped crops, one per seed in `--seeds`. Contact sheets show population-level swap consistency across seeds.
+- `compare.jpg` — 3-column montage (`original | mask | swapped`), one row per sample, built from the primary seed (first entry in `--seeds`). It shows per-sample detail.
 
-Quantitative sanity checks (centering, coverage, swap diff, swap ratio, non-black) run during the script. A swap-ratio warning is logged (not failed) when the ratio falls outside `[0.2, 0.8]` with a pool of >=2 entries. Exit code is non-zero with a clear message if any hard check fails.
+Quantitative sanity checks (centering, coverage, swap diff, swap ratio, non-black) run on the primary seed only. A swap-ratio warning is logged (not failed) when the ratio falls outside `[0.2, 0.8]` with a pool of >=2 entries. The remaining seeds are visual aids: they iterate the dataset with a different RNG seed so the population-level swap behaviour is visible across multiple draws. Exit code is non-zero with a clear message if any hard check fails.
+
+Useful options:
+
+- `--crop-size INT`: bee crop size in pixels. The contact sheet's tile size is `THUMB_SIZE` (display), independent of this.
+- `--seeds "0,1,2"`: comma-separated list of seeds for the contact sheets. The first seed is the primary run (quantitative checks + `compare.jpg`); the rest are visual aids.
+
+The swap uses the MOG2 mask values `127` (shadow) and `255` (foreground) as the in-bee region (`mask >= 127`), so the bee is copied from the source frame together with its natural shadow halo. This naturally feathers the cut-out edge between the bee and the new background.
 
 ## `scripts/dino_video_heatmap.py`
 
