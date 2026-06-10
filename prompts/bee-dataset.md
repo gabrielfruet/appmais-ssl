@@ -12,6 +12,56 @@ output has four visible problems and the code is harder to test than
 it needs to be.** Your job is to fix the visible problems and refactor
 the few big functions into smaller, testable methods.
 
+## GIT COMMIT DISCIPLINE — read this first
+
+**The agent that runs this prompt has a habit of forgetting to
+commit.** Recent iterations shipped with uncommitted
+work-in-progress, which makes review painful. The next
+iteration's reviewer (a human) will reject any PR that does
+not show **at least 7 new commits** for this iteration (1
+prompt rewrite + 6 step commits). Make the commits
+impossible to skip:
+
+- **One commit per step (Steps 1–6).** A commit is the
+  *last* action of each step, *after* the changes are
+  written and *before* the next step starts. If `git status`
+  shows uncommitted changes at the end of a step, you forgot
+  to commit.
+- **End-of-step commit gate.** Every step (1–6) ends with a
+  callout block reminding you to commit. **Do not** skip that
+  block. The pattern is the same every time:
+
+  ```bash
+  git add -A
+  git commit -m "<conventional message describing this step>"
+  git log --oneline -1   # must show your new commit
+  ```
+- **Commit-count gate before `touch DONE`.** The Exit
+  signal section at the bottom of this prompt has a shell
+  snippet that checks `git log --oneline HEAD~7..HEAD` and
+  `git status`. If either fails, **do not** `touch DONE`.
+  The reviewer will catch it, but better to catch it
+  yourself.
+
+The expected commit list (titles illustrative, messages
+must follow `AGENTS.md`'s conventional style — `feat:`,
+`fix:`, `refactor:`, `docs:`, `test:`, `chore:`):
+
+1. `chore(prompts): rewrite bee-dataset prompt for polish pass`
+   *(this commit, in the same iteration — the prompt
+   rewrite is the first commit, not part of the next pi's
+   work)*
+2. `refactor(dataset): break __getitem__ into testable helpers`
+3. `fix(dataset): _load_background returns RGB (BGR/RGB fix)`
+4. `fix(bee_crop): swap uses shadow mask + foreground for natural feathering`
+5. `feat(dataset): default crop_size = 128, add --crop-size to smoke test`
+6. `feat(smoke): render 3 contact sheets per run (one per seed)`
+7. `docs(scripts): document new defaults, shadow+foreground swap, multi-sheet output`
+
+(7 commits is the *minimum*; more is fine if you find a
+fix-up commit is needed during Step 7's gate. But **never
+fewer** — that is the bar.)
+
 ## What this iteration fixes (do not lose sight of this)
 
 1. **Wrong colors in the swap.** The contact sheet has a peach/blue
@@ -312,6 +362,18 @@ uv run basedpyright
 All checks green. The test count goes from 11 to ~14+ (one new
 test per helper extracted, give or take).
 
+> **End-of-step commit (mandatory, do not skip).** Before
+> moving to Step 2, commit your work:
+> ```bash
+> git add -A
+> git commit -m "refactor(dataset): break __getitem__ into testable helpers"
+> git log --oneline -1   # must show your new commit
+> ```
+> If `git status` still shows uncommitted changes after the
+> commit, you missed a file. Add it and commit again. The full
+> commit list is in the GIT COMMIT DISCIPLINE section at the
+> top of this prompt.
+
 ---
 
 ## Step 2 — Fix the BGR/RGB color mismatch (NEW)
@@ -397,6 +459,18 @@ uv run pytest
 ```
 
 The two new tests pass. The previous 11 tests still pass.
+
+> **End-of-step commit (mandatory, do not skip).** Before
+> moving to Step 3, commit your work:
+> ```bash
+> git add -A
+> git commit -m "fix(dataset): _load_background returns RGB (BGR/RGB fix)"
+> git log --oneline -1   # must show your new commit
+> ```
+> If `git status` still shows uncommitted changes after the
+> commit, you missed a file. Add it and commit again. The full
+> commit list is in the GIT COMMIT DISCIPLINE section at the
+> top of this prompt.
 
 ---
 
@@ -489,6 +563,18 @@ uv run pytest
 
 The new test passes; the 14+ existing tests still pass.
 
+> **End-of-step commit (mandatory, do not skip).** Before
+> moving to Step 4, commit your work:
+> ```bash
+> git add -A
+> git commit -m "fix(bee_crop): swap uses shadow mask + foreground for natural feathering"
+> git log --oneline -1   # must show your new commit
+> ```
+> If `git status` still shows uncommitted changes after the
+> commit, you missed a file. Add it and commit again. The full
+> commit list is in the GIT COMMIT DISCIPLINE section at the
+> top of this prompt.
+
 ---
 
 ## Step 4 — Smaller crops (default 128) (MODIFIED)
@@ -544,6 +630,18 @@ The smoke test's `samples/bees/sample_*.jpg` files should be
 uv run python -c "import cv2; print(cv2.imread('samples/bees/sample_000_original.jpg').shape)"
 # Should print (128, 128, 3)
 ```
+
+> **End-of-step commit (mandatory, do not skip).** Before
+> moving to Step 5, commit your work:
+> ```bash
+> git add -A
+> git commit -m "feat(dataset): default crop_size = 128, add --crop-size to smoke test"
+> git log --oneline -1   # must show your new commit
+> ```
+> If `git status` still shows uncommitted changes after the
+> commit, you missed a file. Add it and commit again. The full
+> commit list is in the GIT COMMIT DISCIPLINE section at the
+> top of this prompt.
 
 ---
 
@@ -643,6 +741,18 @@ three, the majority of samples should be recognizably
 "bee-like" (a dark blob on a hive background, with the
 swap boundary invisible).
 
+> **End-of-step commit (mandatory, do not skip).** Before
+> moving to Step 6, commit your work:
+> ```bash
+> git add -A
+> git commit -m "feat(smoke): render 3 contact sheets per run (one per seed)"
+> git log --oneline -1   # must show your new commit
+> ```
+> If `git status` still shows uncommitted changes after the
+> commit, you missed a file. Add it and commit again. The full
+> commit list is in the GIT COMMIT DISCIPLINE section at the
+> top of this prompt.
+
 ---
 
 ## Step 6 — Documentation (MODIFIED)
@@ -683,6 +793,18 @@ section to mention:
 If `docs/ENGINE.md` does not exist, **do not create it in
 this iteration** — that's a separate task. Just update
 `docs/SCRIPTS.md`.
+
+> **End-of-step commit (mandatory, do not skip).** Before
+> moving to Step 7, commit your work:
+> ```bash
+> git add -A
+> git commit -m "docs(scripts): document new defaults, shadow+foreground swap, multi-sheet output"
+> git log --oneline -1   # must show your new commit
+> ```
+> If `git status` still shows uncommitted changes after the
+> commit, you missed a file. Add it and commit again. The full
+> commit list is in the GIT COMMIT DISCIPLINE section at the
+> top of this prompt.
 
 ---
 
@@ -791,6 +913,27 @@ The ralph loop (`prompts/ralph.sh`) watches for this file and
 stops iterating as soon as it appears. The loop also stops on
 a red test tree or a `pi` crash, in which case you should NOT
 have created `DONE` — a human will pick it up.
+
+**Commit-count gate (mandatory, runs immediately before `touch DONE`):**
+
+```bash
+NEW_COMMITS=$(git log --oneline HEAD~7..HEAD | wc -l | tr -d ' ')
+[ "$NEW_COMMITS" -ge 7 ] || {
+    echo "ERROR: expected >=7 new commits, got $NEW_COMMITS"
+    echo "Reviewer will reject the PR. Run 'git log --oneline HEAD~7..HEAD' to see what shipped."
+    exit 1
+}
+git status --porcelain | grep -q . && {
+    echo "ERROR: git status is dirty. Commit first, then touch DONE."
+    git status --short
+    exit 1
+}
+```
+
+The expected 7 commits are listed in the GIT COMMIT DISCIPLINE
+section at the top of this prompt. If the count is short or the
+tree is dirty, fix and re-run the gate. **Do not** `touch DONE`
+on a failed gate.
 
 Rules:
 
