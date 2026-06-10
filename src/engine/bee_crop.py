@@ -56,29 +56,6 @@ def sample_bee_bbox(
     return components[index]
 
 
-def square_window(
-    bbox: BeeBBox,
-    image_shape: tuple[int, int],
-    padding_factor: float,
-) -> tuple[int, int, int, int]:
-    """Return a square window (x1, y1, x2, y2) centered on ``bbox``.
-
-    The window is allowed to extend outside the image bounds; consumers
-    pad with replicated border. ``image_shape`` is (H, W).
-    """
-    height, width = image_shape
-    side = int(round(max(bbox.w, bbox.h) * padding_factor))
-    side = min(side, min(height, width))
-    center_x = bbox.x + bbox.w // 2
-    center_y = bbox.y + bbox.h // 2
-    half = side // 2
-    x1 = center_x - half
-    y1 = center_y - half
-    x2 = x1 + side
-    y2 = y1 + side
-    return x1, y1, x2, y2
-
-
 def crop_with_border(
     image: np.ndarray, window: tuple[int, int, int, int]
 ) -> np.ndarray:
@@ -141,3 +118,34 @@ def mask_to_classes(mask: np.ndarray) -> np.ndarray:
     classes[mask == 127] = 1
     classes[mask == 255] = 2
     return classes
+
+
+def sample_center_from_distance_transform(
+    mask: np.ndarray, rng: np.random.Generator, crop_size: int
+) -> tuple[int, int]:
+    """Return ``(cy, cx)`` sampled with probability proportional to the EDT of ``mask``.
+
+    The binary foreground is ``(mask >= 1).astype(uint8)`` (bee body + shadow
+    halo treated as one region). The EDT peak lands inside the bee body;
+    deeper foreground pixels are more likely to be sampled as the crop
+    center. The returned center is clamped so the ``crop_size x crop_size``
+    window stays in bounds.
+
+    Raises ``ValueError`` if the mask has no foreground or if ``crop_size``
+    does not fit in the mask shape.
+    """
+    foreground = (mask >= 1).astype(np.uint8)
+    edt = cv2.distanceTransform(foreground, cv2.DIST_L2, 5)
+    flat = edt.ravel().astype(np.float64)
+    total = float(flat.sum())
+    if total <= 0:
+        raise ValueError("mask has no foreground — caller should have filtered")
+    choice = rng.choice(flat.size, p=flat / total)
+    cy, cx = np.unravel_index(choice, edt.shape)
+    height, width = foreground.shape
+    half = int(crop_size) // 2
+    if half <= 0 or 2 * half > width or 2 * half > height:
+        raise ValueError(f"crop_size={crop_size} does not fit in {(height, width)}")
+    cx = int(np.clip(cx, half, width - half - 1))
+    cy = int(np.clip(cy, half, height - half - 1))
+    return cy, cx

@@ -1,13 +1,13 @@
 """Tests for the pure helpers in engine.bee_crop."""
 
 import numpy as np
+import pytest
 
 from engine.bee_crop import (
-    BeeBBox,
     build_swapped_crop,
     find_bee_components,
     mask_to_classes,
-    square_window,
+    sample_center_from_distance_transform,
 )
 
 
@@ -19,12 +19,6 @@ def test_find_bee_components() -> None:
     comps = find_bee_components(mask, min_area=50)
     assert len(comps) == 2 and all(c.area == 900 for c in comps)
     assert find_bee_components(mask, min_area=1000) == []
-
-
-def test_square_window() -> None:
-    bbox = BeeBBox(x=50, y=50, w=20, h=20, area=400)
-    x1, y1, x2, y2 = square_window(bbox, (200, 200), padding_factor=1.5)
-    assert x2 - x1 == 30 and (x1 + x2) // 2 == 60 and (y1 + y2) // 2 == 60
 
 
 def test_mask_to_classes() -> None:
@@ -53,3 +47,24 @@ def test_build_swapped_crop_resizes_background() -> None:
     bg_small = np.full((50, 50, 3), 200, dtype=np.uint8)
     swapped, _ = build_swapped_crop(img, mask, bg_small, (30, 30, 70, 70), 40)
     assert swapped.shape == (40, 40, 3) and (swapped[0:10, :] == 200).all()
+
+
+def test_sample_center_from_distance_transform() -> None:
+    """Center is sampled at the EDT peak and clamped to valid bounds."""
+    mask = np.zeros((32, 32), dtype=np.uint8)
+    mask[11:21, 11:21] = 1
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        cy, cx = sample_center_from_distance_transform(mask, rng, crop_size=8)
+        # post-clamp: half=4, so cy in [4, 27] and cx in [4, 27]
+        assert 4 <= cy < 28
+        assert 4 <= cx < 28
+    # No-foreground mask raises
+    empty = np.zeros((32, 32), dtype=np.uint8)
+    with pytest.raises(ValueError):
+        sample_center_from_distance_transform(empty, rng, crop_size=8)
+    # Over-large crop_size raises
+    small = np.zeros((16, 16), dtype=np.uint8)
+    small[7:9, 7:9] = 1
+    with pytest.raises(ValueError):
+        sample_center_from_distance_transform(small, rng, crop_size=32)

@@ -7,6 +7,7 @@ Usage:
         --videos-file data/curated_videos.txt
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -19,6 +20,22 @@ from engine.bee_crop import find_bee_components
 VIDEO_EXTENSIONS = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 THUMBNAIL_SIZE = (64, 64)
 MOG2_BLUR_KERNEL_SIZE = (9, 9)
+
+
+@dataclass(frozen=True)
+class _VideoCaptureInfo:
+    capture: cv2.VideoCapture
+    fps: float
+    total_frames: int
+    duration_seconds: float
+
+
+@dataclass(frozen=True)
+class _ExtractionStats:
+    saved_count: int
+    sampled_count: int
+    skipped_no_bee: int = 0
+    original_frame_shape: tuple[int, int] | None = None
 
 
 def find_videos(input_path: Path) -> list[Path]:
@@ -191,6 +208,179 @@ def save_background_image(
     )
 
 
+def _open_capture(video_path: Path) -> _VideoCaptureInfo:
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise click.ClickException(f"Could not open video: {video_path}")
+
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if fps <= 0.0 or total_frames <= 0:
+        capture.release()
+        raise click.ClickException(f"Could not read video metadata: {video_path}")
+
+    return _VideoCaptureInfo(
+        capture=capture,
+        fps=fps,
+        total_frames=total_frames,
+        duration_seconds=total_frames / fps,
+    )
+
+
+def _extract_with_mog2(
+    capture_info: _VideoCaptureInfo,
+    video_path: Path,
+    output_dir: Path,
+    sample_every_seconds: float,
+    diff_threshold: float,
+    min_gap_seconds: float,
+    max_frames: int,
+    jpeg_quality: int,
+    skip_start_seconds: float,
+    mog2_downsample_width: int,
+    min_bee_area: int,
+    background_subtractor: cv2.BackgroundSubtractor,
+) -> _ExtractionStats:
+    export_duration_seconds = capture_info.duration_seconds - skip_start_seconds
+    candidate_count = int(export_duration_seconds / sample_every_seconds) + 1
+    last_saved_signature: np.ndarray | None = None
+    last_saved_time = -min_gap_seconds
+    saved_count = 0
+    sampled_count = 0
+    skipped_no_bee = 0
+    original_frame_shape: tuple[int, int] | None = None
+    next_sample_time = skip_start_seconds
+    frame_index = 0
+    progress = tqdm(
+        total=candidate_count,
+        desc=video_path.name,
+        unit="sample",
+        leave=False,
+    )
+    try:
+        while saved_count < max_frames:
+            ok, frame = capture_info.capture.read()
+            if not ok:
+                break
+
+            timestamp_seconds = frame_index / capture_info.fps
+            if original_frame_shape is None:
+                original_frame_shape = frame.shape[:2]
+            mog2_frame = preprocess_for_mog2(frame, mog2_downsample_width)
+            raw_mask = background_subtractor.apply(mog2_frame)
+            frame_index += 1
+
+            if timestamp_seconds + 1e-9 < next_sample_time:
+                continue
+
+            progress.update(1)
+            sampled_count += 1
+            should_save, signature = should_save_frame(
+                frame=frame,
+                timestamp_seconds=timestamp_seconds,
+                last_saved_signature=last_saved_signature,
+                last_saved_time=last_saved_time,
+                min_gap_seconds=min_gap_seconds,
+                diff_threshold=diff_threshold,
+            )
+            while next_sample_time <= timestamp_seconds:
+                next_sample_time += sample_every_seconds
+            if not should_save:
+                continue
+
+            full_mask = resize_mask_to_frame(normalize_mog2_mask(raw_mask), frame)
+            if not find_bee_components(full_mask, min_area=min_bee_area):
+                skipped_no_bee += 1
+                continue
+
+            saved_count += 1
+            frame_path = output_path_for_frame(
+                output_dir, video_path, saved_count, timestamp_seconds
+            )
+            write_frame(
+                frame_path=frame_path,
+                frame=frame,
+                jpeg_quality=jpeg_quality,
+                foreground_mask=full_mask,
+            )
+
+            last_saved_signature = signature
+            last_saved_time = timestamp_seconds
+    finally:
+        progress.close()
+
+    return _ExtractionStats(
+        saved_count=saved_count,
+        sampled_count=sampled_count,
+        skipped_no_bee=skipped_no_bee,
+        original_frame_shape=original_frame_shape,
+    )
+
+
+def _extract_without_mog2(
+    capture_info: _VideoCaptureInfo,
+    video_path: Path,
+    output_dir: Path,
+    sample_every_seconds: float,
+    diff_threshold: float,
+    min_gap_seconds: float,
+    max_frames: int,
+    jpeg_quality: int,
+    skip_start_seconds: float,
+) -> _ExtractionStats:
+    export_duration_seconds = capture_info.duration_seconds - skip_start_seconds
+    candidate_count = int(export_duration_seconds / sample_every_seconds) + 1
+    last_saved_signature: np.ndarray | None = None
+    last_saved_time = -min_gap_seconds
+    saved_count = 0
+    sampled_count = 0
+    progress = tqdm(
+        range(candidate_count),
+        desc=video_path.name,
+        unit="sample",
+        leave=False,
+    )
+    for candidate_index in progress:
+        if saved_count >= max_frames:
+            break
+
+        timestamp_seconds = skip_start_seconds + (
+            candidate_index * sample_every_seconds
+        )
+        capture_info.capture.set(cv2.CAP_PROP_POS_MSEC, timestamp_seconds * 1000.0)
+        ok, frame = capture_info.capture.read()
+        if not ok:
+            continue
+
+        sampled_count += 1
+        should_save, signature = should_save_frame(
+            frame=frame,
+            timestamp_seconds=timestamp_seconds,
+            last_saved_signature=last_saved_signature,
+            last_saved_time=last_saved_time,
+            min_gap_seconds=min_gap_seconds,
+            diff_threshold=diff_threshold,
+        )
+        if not should_save:
+            continue
+
+        saved_count += 1
+        frame_path = output_path_for_frame(
+            output_dir, video_path, saved_count, timestamp_seconds
+        )
+        write_frame(
+            frame_path=frame_path,
+            frame=frame,
+            jpeg_quality=jpeg_quality,
+            foreground_mask=None,
+        )
+
+        last_saved_signature = signature
+        last_saved_time = timestamp_seconds
+
+    return _ExtractionStats(saved_count=saved_count, sampled_count=sampled_count)
+
+
 def extract_frames(
     video_path: Path,
     output_dir: Path,
@@ -225,32 +415,15 @@ def extract_frames(
         if existing_background.exists():
             existing_background.unlink()
 
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        raise click.ClickException(f"Could not open video: {video_path}")
-
+    capture_info = _open_capture(video_path)
     try:
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        if fps <= 0.0 or total_frames <= 0:
-            raise click.ClickException(f"Could not read video metadata: {video_path}")
-
-        duration_seconds = total_frames / fps
-        if skip_start_seconds >= duration_seconds:
+        if skip_start_seconds >= capture_info.duration_seconds:
             click.echo(
-                f"{video_path.name}: skipped, duration {duration_seconds:.1f}s "
-                f"is not longer than --skip-start-seconds {skip_start_seconds:.1f}s"
+                f"{video_path.name}: skipped, duration "
+                f"{capture_info.duration_seconds:.1f}s is not longer than "
+                f"--skip-start-seconds {skip_start_seconds:.1f}s"
             )
             return 0
-
-        export_duration_seconds = duration_seconds - skip_start_seconds
-        candidate_count = int(export_duration_seconds / sample_every_seconds) + 1
-        last_saved_signature: np.ndarray | None = None
-        last_saved_time = -min_gap_seconds
-        saved_count = 0
-        sampled_count = 0
-        skipped_no_bee = 0
-        original_frame_shape: tuple[int, int] | None = None
 
         if foreground_masks:
             background_subtractor = cv2.createBackgroundSubtractorMOG2(
@@ -258,122 +431,48 @@ def extract_frames(
                 varThreshold=mog2_var_threshold,
                 detectShadows=True,
             )
-            next_sample_time = skip_start_seconds
-            frame_index = 0
-            progress = tqdm(
-                total=candidate_count,
-                desc=video_path.name,
-                unit="sample",
-                leave=False,
+            stats = _extract_with_mog2(
+                capture_info=capture_info,
+                video_path=video_path,
+                output_dir=output_dir,
+                sample_every_seconds=sample_every_seconds,
+                diff_threshold=diff_threshold,
+                min_gap_seconds=min_gap_seconds,
+                max_frames=max_frames,
+                jpeg_quality=jpeg_quality,
+                skip_start_seconds=skip_start_seconds,
+                mog2_downsample_width=mog2_downsample_width,
+                min_bee_area=min_bee_area,
+                background_subtractor=background_subtractor,
             )
-            while saved_count < max_frames:
-                ok, frame = capture.read()
-                if not ok:
-                    break
-
-                timestamp_seconds = frame_index / fps
-                if original_frame_shape is None:
-                    original_frame_shape = frame.shape[:2]
-                mog2_frame = preprocess_for_mog2(frame, mog2_downsample_width)
-                raw_mask = background_subtractor.apply(mog2_frame)
-                frame_index += 1
-
-                if timestamp_seconds + 1e-9 < next_sample_time:
-                    continue
-
-                progress.update(1)
-                sampled_count += 1
-                should_save, signature = should_save_frame(
-                    frame=frame,
-                    timestamp_seconds=timestamp_seconds,
-                    last_saved_signature=last_saved_signature,
-                    last_saved_time=last_saved_time,
-                    min_gap_seconds=min_gap_seconds,
-                    diff_threshold=diff_threshold,
-                )
-                while next_sample_time <= timestamp_seconds:
-                    next_sample_time += sample_every_seconds
-                if not should_save:
-                    continue
-
-                full_mask = resize_mask_to_frame(normalize_mog2_mask(raw_mask), frame)
-                if not find_bee_components(full_mask, min_area=min_bee_area):
-                    skipped_no_bee += 1
-                    continue
-
-                saved_count += 1
-                frame_path = output_path_for_frame(
-                    output_dir, video_path, saved_count, timestamp_seconds
-                )
-                write_frame(
-                    frame_path=frame_path,
-                    frame=frame,
-                    jpeg_quality=jpeg_quality,
-                    foreground_mask=full_mask,
-                )
-
-                last_saved_signature = signature
-                last_saved_time = timestamp_seconds
-            progress.close()
             if save_background:
                 save_background_image(
                     video_path,
                     video_output_dir,
                     background_subtractor,
-                    original_frame_shape=original_frame_shape,
+                    original_frame_shape=stats.original_frame_shape,
                 )
         else:
-            progress = tqdm(
-                range(candidate_count),
-                desc=video_path.name,
-                unit="sample",
-                leave=False,
+            stats = _extract_without_mog2(
+                capture_info=capture_info,
+                video_path=video_path,
+                output_dir=output_dir,
+                sample_every_seconds=sample_every_seconds,
+                diff_threshold=diff_threshold,
+                min_gap_seconds=min_gap_seconds,
+                max_frames=max_frames,
+                jpeg_quality=jpeg_quality,
+                skip_start_seconds=skip_start_seconds,
             )
-            for candidate_index in progress:
-                if saved_count >= max_frames:
-                    break
-
-                timestamp_seconds = skip_start_seconds + (
-                    candidate_index * sample_every_seconds
-                )
-                capture.set(cv2.CAP_PROP_POS_MSEC, timestamp_seconds * 1000.0)
-                ok, frame = capture.read()
-                if not ok:
-                    continue
-
-                sampled_count += 1
-                should_save, signature = should_save_frame(
-                    frame=frame,
-                    timestamp_seconds=timestamp_seconds,
-                    last_saved_signature=last_saved_signature,
-                    last_saved_time=last_saved_time,
-                    min_gap_seconds=min_gap_seconds,
-                    diff_threshold=diff_threshold,
-                )
-                if not should_save:
-                    continue
-
-                saved_count += 1
-                frame_path = output_path_for_frame(
-                    output_dir, video_path, saved_count, timestamp_seconds
-                )
-                write_frame(
-                    frame_path=frame_path,
-                    frame=frame,
-                    jpeg_quality=jpeg_quality,
-                    foreground_mask=None,
-                )
-
-                last_saved_signature = signature
-                last_saved_time = timestamp_seconds
 
         click.echo(
-            f"{video_path.name}: sampled {sampled_count}, saved {saved_count}, "
-            f"skipped {skipped_no_bee} no-bee to {video_output_dir}"
+            f"{video_path.name}: sampled {stats.sampled_count}, "
+            f"saved {stats.saved_count}, skipped {stats.skipped_no_bee} "
+            f"no-bee to {video_output_dir}"
         )
-        return saved_count
+        return stats.saved_count
     finally:
-        capture.release()
+        capture_info.capture.release()
 
 
 @click.command()

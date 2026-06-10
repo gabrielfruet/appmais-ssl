@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -17,11 +18,8 @@ import numpy as np
 import torch
 
 from engine.bee_crop import (
-    BeeBBox,
     crop_with_border,
-    find_bee_components,
-    sample_bee_bbox,
-    square_window,
+    sample_center_from_distance_transform,
 )
 from engine.dataset import BeeCropDataset
 
@@ -34,12 +32,21 @@ LUMINANCE_FLOOR = 5.0
 ORIGINAL_LUMINANCE_FLOOR = 30.0
 SWAP_DIFF_FLOOR = 5.0
 BG_DETAIL_FLOOR = 8.0
-CENTER_LOW = 0.2
-CENTER_HIGH = 0.8
+CENTER_LOW = 0.4
+CENTER_HIGH = 0.6
 COVERAGE_LOW = 0.02
 COVERAGE_HIGH = 0.60
 SWAP_RATIO_LOW = 0.20
 SWAP_RATIO_HIGH = 0.80
+
+
+@dataclass(frozen=True)
+class _SampleResult:
+    index: int
+    image_rgb: np.ndarray
+    mask_classes: np.ndarray
+    original_rgb: np.ndarray
+    swapped: bool
 
 
 def _tensor_to_uint8_rgb(tensor: torch.Tensor) -> np.ndarray:
@@ -52,16 +59,17 @@ def _load_original_crop(
     frame_path: Path,
     mask_path: Path,
     crop_size: int,
-    padding_factor: float,
     min_area: int,
     index: int,
+    seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute the original (unswapped) crop for a sample.
 
-    Uses the same RNG seed as the dataset (SEED + index) so the picked
-    component matches. Raises if no foreground component is found;
-    after the dataset's init filter this should be unreachable in
-    practice.
+    Uses the same EDT-driven center sampling as the dataset
+    (``seed + index + 2 + epoch=0``) so the crop matches what
+    ``BeeCropDataset.__getitem__`` would return without the
+    background swap. Raises if the mask has no foreground
+    (should be unreachable after the dataset's init filter).
     """
     image_bgr = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
     mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
@@ -72,25 +80,29 @@ def _load_original_crop(
     if mask.ndim == 3:
         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
 
-    components = find_bee_components(mask, min_area)
-    if not components:
+    if not _has_foreground(mask, min_area):
         raise ValueError(f"No foreground components in {mask_path}")
 
-    rng = np.random.default_rng(SEED + index)
-    bbox: BeeBBox = sample_bee_bbox(components, rng)  # type: ignore[assignment]
-    if bbox is None:
-        raise ValueError(f"Could not sample a component in {mask_path}")
-
-    window = square_window(bbox, image_bgr.shape[:2], padding_factor)
-    image_crop = crop_with_border(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), window)
+    center_rng = np.random.default_rng(seed + index + 2)
+    cy, cx = sample_center_from_distance_transform(mask, center_rng, crop_size)
+    half = crop_size // 2
+    x0 = cx - half
+    y0 = cy - half
+    window = (x0, y0, x0 + crop_size, y0 + crop_size)
+    image_rgb = crop_with_border(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), window)
     mask_crop = crop_with_border(mask, window)
-    image_resized = cv2.resize(
-        image_crop, (crop_size, crop_size), interpolation=cv2.INTER_AREA
+    return image_rgb, mask_crop
+
+
+def _has_foreground(mask: np.ndarray, min_area: int) -> bool:
+    binary = (mask == 255).astype(np.uint8)
+    _num_labels, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        binary, connectivity=8
     )
-    mask_resized = cv2.resize(
-        mask_crop, (crop_size, crop_size), interpolation=cv2.INTER_NEAREST
-    )
-    return image_resized, mask_resized
+    for label in range(1, stats.shape[0]):
+        if int(stats[label, cv2.CC_STAT_AREA]) >= min_area:
+            return True
+    return False
 
 
 def _save_uint8(path: Path, image: np.ndarray) -> None:
@@ -203,6 +215,153 @@ def _check_background_sizes(dataset: BeeCropDataset, failures: list[str]) -> Non
             )
 
 
+def _run_preflight(
+    dataset: BeeCropDataset, num_samples: int, failures: list[str]
+) -> None:
+    if len(dataset) == 0:
+        failures.append("dataset has zero samples")
+    if len(dataset) < num_samples:
+        failures.append(
+            f"dataset has {len(dataset)} samples, "
+            f"need at least num_samples={num_samples}"
+        )
+    pool_size = len(dataset.background_pool)
+    if pool_size < 2:
+        click.echo(
+            f"WARNING: background pool has {pool_size} entry; "
+            "swap-diff check is toothless with a single background."
+        )
+    _check_background_sizes(dataset, failures)
+
+
+def _check_sample(result: _SampleResult, failures: list[str], crop_size: int) -> None:
+    if int((result.mask_classes == 2).sum()) == 0:
+        failures.append(f"sample {result.index}: mask has zero foreground pixels")
+
+    ok_brightness, mean_lum = _check_luminance(result.image_rgb, LUMINANCE_FLOOR)
+    if not ok_brightness:
+        failures.append(
+            f"sample {result.index}: swapped mean luminance {mean_lum:.1f} "
+            f"below {LUMINANCE_FLOOR}"
+        )
+
+    ok_orig, mean_orig = _check_luminance(result.original_rgb, ORIGINAL_LUMINANCE_FLOOR)
+    if not ok_orig:
+        failures.append(
+            f"sample {result.index}: original mean luminance {mean_orig:.1f} "
+            f"below {ORIGINAL_LUMINANCE_FLOOR}"
+        )
+
+    ok_center, cx, cy = _check_centering(result.mask_classes, crop_size)
+    if not ok_center:
+        failures.append(
+            f"sample {result.index}: foreground centroid ({cx:.1f}, {cy:.1f}) "
+            f"outside [{CENTER_LOW * crop_size}, {CENTER_HIGH * crop_size}]"
+        )
+    ok_cov, coverage = _check_coverage(result.mask_classes)
+    if not ok_cov:
+        failures.append(
+            f"sample {result.index}: coverage {coverage:.3f} outside "
+            f"[{COVERAGE_LOW}, {COVERAGE_HIGH}]"
+        )
+
+    if not result.swapped:
+        return
+    ok_diff, mean_diff = _check_swap_diff(
+        result.original_rgb, result.image_rgb, result.mask_classes
+    )
+    if not ok_diff:
+        failures.append(
+            f"sample {result.index}: swap diff {mean_diff:.1f} below {SWAP_DIFF_FLOOR}"
+        )
+    ok_detail, std = _check_background_detail(result.image_rgb, result.mask_classes)
+    if not ok_detail:
+        failures.append(
+            f"sample {result.index}: swapped background region std {std:.1f} "
+            f"below {BG_DETAIL_FLOOR}"
+        )
+
+
+def _save_sample_files(output_dir: Path, result: _SampleResult) -> None:
+    suffix = "_swapped" if result.swapped else ""
+    _save_uint8(
+        output_dir / f"sample_{result.index:03d}{suffix}.jpg",
+        cv2.cvtColor(result.image_rgb, cv2.COLOR_RGB2BGR),
+    )
+    _save_uint8(
+        output_dir / f"sample_{result.index:03d}_original.jpg",
+        cv2.cvtColor(result.original_rgb, cv2.COLOR_RGB2BGR),
+    )
+    mask_vis = result.mask_classes.astype(np.uint8) * 127
+    cv2.imwrite(str(output_dir / f"sample_{result.index:03d}_mask.png"), mask_vis)
+
+
+def _collect_samples(
+    dataset: BeeCropDataset,
+    num_samples: int,
+    failures: list[str],
+    output_dir: Path,
+    crop_size: int,
+    seed: int,
+) -> list[_SampleResult]:
+    results: list[_SampleResult] = []
+    num_to_show = min(num_samples, len(dataset))
+    for index in range(num_to_show):
+        sample = dataset[index]
+        image_tensor = cast(torch.Tensor, sample["image"])
+        image_rgb = _tensor_to_uint8_rgb(image_tensor)
+        mask_classes = cast(torch.Tensor, sample["mask"]).cpu().numpy()
+        swapped = bool(sample["swapped"])
+
+        sample_meta = dataset._samples[index]
+        original_rgb, _ = _load_original_crop(
+            frame_path=sample_meta.frame_path,
+            mask_path=sample_meta.mask_path,
+            crop_size=crop_size,
+            min_area=dataset._min_area,
+            index=index,
+            seed=seed,
+        )
+        result = _SampleResult(
+            index=index,
+            image_rgb=image_rgb,
+            mask_classes=mask_classes,
+            original_rgb=original_rgb,
+            swapped=swapped,
+        )
+        _check_sample(result, failures, crop_size)
+        _save_sample_files(output_dir, result)
+        results.append(result)
+    return results
+
+
+def _build_sheets(
+    results: list[_SampleResult], output_dir: Path, seeds: list[int]
+) -> None:
+    _ = seeds
+    swapped_rgbs = [result.image_rgb for result in results]
+    saved_swapped = [result.image_rgb for result in results if result.swapped]
+    if saved_swapped:
+        contact_sheet = _make_montage(
+            saved_swapped, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
+        )
+    else:
+        click.echo("No swapped samples; contact sheet uses unswapped crops.")
+        contact_sheet = _make_montage(
+            swapped_rgbs, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
+        )
+    _save_uint8(output_dir / "contact_sheet.jpg", contact_sheet)
+
+    compare_tiles: list[np.ndarray] = []
+    for result in results:
+        mask_vis = np.stack([result.mask_classes.astype(np.uint8) * 127] * 3, axis=-1)
+        compare_tiles.extend([result.original_rgb, mask_vis, result.image_rgb])
+    compare_sheet = _make_montage(
+        compare_tiles, cols=3, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
+    )
+    _save_uint8(output_dir / "compare.jpg", compare_sheet)
+
+
 @click.command()
 @click.argument(
     "root", default="data/frames", type=click.Path(exists=True, path_type=Path)
@@ -226,154 +385,31 @@ def main(root: Path, num_samples: int, output: Path) -> None:
     )
 
     failures: list[str] = []
-
-    # Pre-flight checks (these are the new strictness gates).
-    if len(dataset) == 0:
-        raise click.ClickException(f"No samples found in {root}")
-    if len(dataset) < num_samples:
-        raise click.ClickException(
-            f"dataset has {len(dataset)} samples, "
-            f"need at least num_samples={num_samples}"
-        )
-    pool_size = len(dataset.background_pool)
-    if pool_size < 2:
-        click.echo(
-            f"WARNING: background pool has {pool_size} entry; "
-            "swap-diff check is toothless with a single background."
-        )
-    _check_background_sizes(dataset, failures)
+    _run_preflight(dataset, num_samples, failures)
 
     num_to_show = min(num_samples, len(dataset))
+    pool_size = len(dataset.background_pool)
     click.echo(
         f"Dataset size: {len(dataset)}, showing {num_to_show}, pool size: {pool_size}"
     )
 
-    swapped_count = 0
-    saved_swapped: list[np.ndarray] = []
-    original_rgbs: list[np.ndarray] = []
-    mask_classes_list: list[np.ndarray] = []
-    swapped_rgbs: list[np.ndarray] = []
-
-    for index in range(num_to_show):
-        sample = dataset[index]
-        image_tensor = cast(torch.Tensor, sample["image"])
-        swapped_rgb = _tensor_to_uint8_rgb(image_tensor)
-        mask_classes = cast(torch.Tensor, sample["mask"]).cpu().numpy()
-        swapped_flag = bool(sample["swapped"])
-
-        # Reproduce the original (unswapped) crop for side-by-side comparison.
-        sample_meta = dataset._samples[index]
-        frame_path, mask_path = sample_meta.frame_path, sample_meta.mask_path
-        original_rgb, _ = _load_original_crop(
-            frame_path=frame_path,
-            mask_path=mask_path,
-            crop_size=CROP_SIZE,
-            padding_factor=dataset._padding_factor,
-            min_area=dataset._min_area,
-            index=index,
-        )
-
-        if swapped_flag:
-            swapped_count += 1
-            saved_swapped.append(swapped_rgb)
-
-        original_rgbs.append(original_rgb)
-        mask_classes_list.append(mask_classes)
-        swapped_rgbs.append(swapped_rgb)
-
-        # No-empty-mask: every sample must have foreground pixels.
-        if int((mask_classes == 2).sum()) == 0:
-            failures.append(f"sample {index}: mask has zero foreground pixels")
-
-        # Luminance on the swapped crop (cheap, always checked).
-        ok_brightness, mean_lum = _check_luminance(swapped_rgb, LUMINANCE_FLOOR)
-        if not ok_brightness:
-            failures.append(
-                f"sample {index}: swapped mean luminance {mean_lum:.1f} "
-                f"below {LUMINANCE_FLOOR}"
-            )
-
-        # Luminance on the original (catches full-hive or black fallbacks).
-        ok_orig, mean_orig = _check_luminance(original_rgb, ORIGINAL_LUMINANCE_FLOOR)
-        if not ok_orig:
-            failures.append(
-                f"sample {index}: original mean luminance {mean_orig:.1f} "
-                f"below {ORIGINAL_LUMINANCE_FLOOR}"
-            )
-
-        # Centering + coverage on the foreground.
-        ok_center, cx, cy = _check_centering(mask_classes, CROP_SIZE)
-        if not ok_center:
-            failures.append(
-                f"sample {index}: foreground centroid ({cx:.1f}, {cy:.1f}) "
-                f"outside [{CENTER_LOW * CROP_SIZE}, {CENTER_HIGH * CROP_SIZE}]"
-            )
-        ok_cov, coverage = _check_coverage(mask_classes)
-        if not ok_cov:
-            failures.append(
-                f"sample {index}: coverage {coverage:.3f} outside "
-                f"[{COVERAGE_LOW}, {COVERAGE_HIGH}]"
-            )
-
-        # Swap diff: non-foreground region of swapped must differ from original.
-        if swapped_flag:
-            ok_diff, mean_diff = _check_swap_diff(
-                original_rgb, swapped_rgb, mask_classes
-            )
-            if not ok_diff:
-                failures.append(
-                    f"sample {index}: swap diff {mean_diff:.1f} below {SWAP_DIFF_FLOOR}"
-                )
-            ok_detail, std = _check_background_detail(swapped_rgb, mask_classes)
-            if not ok_detail:
-                failures.append(
-                    f"sample {index}: swapped background region std {std:.1f} "
-                    f"below {BG_DETAIL_FLOOR}"
-                )
-
-        # Save per-sample files.
-        suffix = "_swapped" if swapped_flag else ""
-        _save_uint8(
-            output / f"sample_{index:03d}{suffix}.jpg",
-            cv2.cvtColor(swapped_rgb, cv2.COLOR_RGB2BGR),
-        )
-        _save_uint8(
-            output / f"sample_{index:03d}_original.jpg",
-            cv2.cvtColor(original_rgb, cv2.COLOR_RGB2BGR),
-        )
-        mask_vis = mask_classes.astype(np.uint8) * 127
-        cv2.imwrite(str(output / f"sample_{index:03d}_mask.png"), mask_vis)
-
-    swap_ratio = swapped_count / num_to_show
+    results = _collect_samples(
+        dataset=dataset,
+        num_samples=num_samples,
+        failures=failures,
+        output_dir=output,
+        crop_size=CROP_SIZE,
+        seed=SEED,
+    )
+    swapped_count = sum(result.swapped for result in results)
+    swap_ratio = swapped_count / max(1, len(results))
     if pool_size >= 2 and not (SWAP_RATIO_LOW <= swap_ratio <= SWAP_RATIO_HIGH):
         click.echo(
             f"WARNING: swap ratio {swap_ratio:.2f} outside "
             f"[{SWAP_RATIO_LOW}, {SWAP_RATIO_HIGH}] (pool size {pool_size})"
         )
 
-    # Contact sheet: if no samples were swapped, fall back to unswapped crops.
-    if saved_swapped:
-        contact_sheet = _make_montage(
-            saved_swapped, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
-        )
-    else:
-        click.echo("No swapped samples; contact sheet uses unswapped crops.")
-        contact_sheet = _make_montage(
-            swapped_rgbs, cols=4, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
-        )
-    _save_uint8(output / "contact_sheet.jpg", contact_sheet)
-
-    compare_tiles: list[np.ndarray] = []
-    for original_rgb, mask_classes, swapped_rgb in zip(
-        original_rgbs, mask_classes_list, swapped_rgbs, strict=False
-    ):
-        mask_vis = np.stack([mask_classes.astype(np.uint8) * 127] * 3, axis=-1)
-        compare_tiles.extend([original_rgb, mask_vis, swapped_rgb])
-    compare_sheet = _make_montage(
-        compare_tiles, cols=3, thumb_w=THUMB_SIZE, thumb_h=THUMB_SIZE
-    )
-    _save_uint8(output / "compare.jpg", compare_sheet)
-
+    _build_sheets(results, output, seeds=[SEED])
     click.echo(f"Items: {num_to_show}, swapped: {swapped_count}")
 
     if failures:

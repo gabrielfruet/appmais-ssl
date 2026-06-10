@@ -2,10 +2,9 @@
 
 The dataset walks a directory of frame/mask pairs, drops any pair whose
 mask has no foreground component of at least ``min_area``, then for
-each kept sample picks a connected component, crops a square window
-around it, and optionally pastes the crop onto a background drawn from
-a pool of ``background.png`` images saved by the frame-extraction
-pipeline.
+each kept sample samples a bee-centered crop from the foreground mask
+and optionally pastes the crop onto a background drawn from a pool of
+``background.png`` images saved by the frame-extraction pipeline.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from engine.bee_crop import (
     find_bee_components,
     mask_to_classes,
     sample_bee_bbox,
-    square_window,
+    sample_center_from_distance_transform,
 )
 
 FRAME_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -38,6 +37,30 @@ class _Sample:
     mask_path: Path
     video_id: str
     frame_id: str
+
+
+@dataclass(frozen=True)
+class _SampleData:
+    frame_bgr: np.ndarray
+    mask: np.ndarray
+    height: int
+    width: int
+
+
+@dataclass(frozen=True)
+class _WindowInfo:
+    window: tuple[int, int, int, int]
+    # Bbox is the sampled foreground component in crop coordinates' source frame.
+    # The EDT center can differ from the bbox center; downstream tasks still use
+    # the bbox as a useful component label.
+    bbox: BeeBBox
+
+
+@dataclass(frozen=True)
+class _CropResult:
+    image_rgb: np.ndarray
+    mask_crop: np.ndarray
+    swapped: bool
 
 
 def _looks_like_mask(frame_stem: str, mask_path: Path) -> bool:
@@ -92,18 +115,6 @@ def _bgr_to_rgb(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 
-def _resize_crop(
-    image_crop: np.ndarray, mask_crop: np.ndarray, crop_size: int
-) -> tuple[np.ndarray, np.ndarray]:
-    image_resized = cv2.resize(
-        image_crop, (crop_size, crop_size), interpolation=cv2.INTER_AREA
-    )
-    mask_resized = cv2.resize(
-        mask_crop, (crop_size, crop_size), interpolation=cv2.INTER_NEAREST
-    )
-    return image_resized, mask_resized
-
-
 def _load_background(path: Path, frame_shape: tuple[int, int]) -> np.ndarray:
     background = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if background is None:
@@ -123,7 +134,6 @@ class BeeCropDataset(Dataset[dict[str, object]]):
         self,
         root: str | Path,
         crop_size: int = 224,
-        padding_factor: float = 1.5,
         min_area: int = 50,
         swap_background_prob: float = 0.5,
         background_pool: Sequence[str | Path] | None = None,
@@ -132,9 +142,9 @@ class BeeCropDataset(Dataset[dict[str, object]]):
     ) -> None:
         self._root = Path(root)
         self._crop_size = int(crop_size)
-        self._padding_factor = float(padding_factor)
         self._min_area = int(min_area)
         self._seed = int(seed)
+        self._epoch: int = 0
         self._transform = transform
 
         self._samples = discover_samples(self._root)
@@ -168,6 +178,15 @@ class BeeCropDataset(Dataset[dict[str, object]]):
         # Mirror torch DataLoader worker seeding by adding idx to base seed.
         return np.random.default_rng(self._seed + int(idx))
 
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch counter used by the center-sampling RNG.
+
+        Same frame yields different crops across epochs (data
+        augmentation); the same ``__getitem__`` call is reproducible
+        within an epoch.
+        """
+        self._epoch = int(epoch)
+
     def _choose_background(
         self, current_video_id: str, rng: np.random.Generator
     ) -> Path:
@@ -182,10 +201,7 @@ class BeeCropDataset(Dataset[dict[str, object]]):
             return other[int(rng.integers(0, len(other)))]
         return self._background_pool[int(rng.integers(0, len(self._background_pool)))]
 
-    def __getitem__(self, idx: int) -> dict[str, object]:
-        sample = self._samples[idx]
-        rng = self._rng(idx)
-
+    def _load_sample(self, sample: _Sample) -> _SampleData:
         frame_bgr = cv2.imread(str(sample.frame_path), cv2.IMREAD_COLOR)
         if frame_bgr is None:
             raise ValueError(f"Could not read frame: {sample.frame_path}")
@@ -194,77 +210,96 @@ class BeeCropDataset(Dataset[dict[str, object]]):
             raise ValueError(f"Could not read mask: {sample.mask_path}")
         if mask.ndim == 3:
             mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-
         height, width = frame_bgr.shape[:2]
-        components = find_bee_components(mask, self._min_area)
+        return _SampleData(frame_bgr=frame_bgr, mask=mask, height=height, width=width)
+
+    def _sample_window(self, sample_data: _SampleData, idx: int) -> _WindowInfo:
+        components = find_bee_components(sample_data.mask, self._min_area)
         if not components:
+            sample = self._samples[idx]
             raise ValueError(
                 f"No foreground components in {sample.frame_path} "
                 f"(min_area={self._min_area})"
             )
 
-        bbox: BeeBBox = sample_bee_bbox(components, rng)  # type: ignore[assignment]
-        window = square_window(
-            bbox=bbox,
-            image_shape=(height, width),
-            padding_factor=self._padding_factor,
-        )
-        window_x1, window_y1, window_x2, window_y2 = window
-        window_w = window_x2 - window_x1
-        window_h = window_y2 - window_y1
+        bbox = sample_bee_bbox(components, self._rng(idx))
+        if bbox is None:
+            raise ValueError("Could not sample a foreground component")
 
-        # Use a separate RNG for the swap decision so the component-picking
-        # RNG state is independent of swap behavior. This lets external code
-        # reproduce the same component pick by seeding with the same value.
+        center_rng = np.random.default_rng(self._seed + int(idx) + 2 + self._epoch)
+        cy, cx = sample_center_from_distance_transform(
+            sample_data.mask, center_rng, self._crop_size
+        )
+        half = self._crop_size // 2
+        x0 = cx - half
+        y0 = cy - half
+        window = (x0, y0, x0 + self._crop_size, y0 + self._crop_size)
+        return _WindowInfo(window=window, bbox=bbox)
+
+    def _build_crop(
+        self, sample_data: _SampleData, window_info: _WindowInfo, idx: int
+    ) -> _CropResult:
         swap_rng = np.random.default_rng(self._seed + int(idx) + 1)
         do_swap = (
             self._swap_probability > 0.0 and swap_rng.random() < self._swap_probability
         )
 
+        image_rgb = _bgr_to_rgb(sample_data.frame_bgr)
         if do_swap:
+            sample = self._samples[idx]
             background_path = self._choose_background(sample.video_id, swap_rng)
-            background = _load_background(background_path, frame_shape=(height, width))
-            image_rgb, mask_resized = build_swapped_crop(
-                image=_bgr_to_rgb(frame_bgr),
-                mask=mask,
+            background = _load_background(
+                background_path, frame_shape=(sample_data.height, sample_data.width)
+            )
+            crop_rgb, mask_crop = build_swapped_crop(
+                image=image_rgb,
+                mask=sample_data.mask,
                 background=background,
-                window=window,
+                window=window_info.window,
                 output_size=self._crop_size,
             )
-            swapped = True
-        else:
-            image_crop = crop_with_border(_bgr_to_rgb(frame_bgr), window)
-            mask_crop = crop_with_border(mask, window)
-            image_rgb, mask_resized = _resize_crop(
-                image_crop, mask_crop, self._crop_size
-            )
-            swapped = False
+            return _CropResult(image_rgb=crop_rgb, mask_crop=mask_crop, swapped=True)
 
-        image_tensor = torch.from_numpy(image_rgb).float().div(255.0).permute(2, 0, 1)
-        mask_classes = mask_to_classes(mask_resized)
+        crop_rgb = crop_with_border(image_rgb, window_info.window)
+        mask_crop = crop_with_border(sample_data.mask, window_info.window)
+        return _CropResult(image_rgb=crop_rgb, mask_crop=mask_crop, swapped=False)
+
+    def _assemble_output(
+        self, sample: _Sample, crop: _CropResult, window_info: _WindowInfo
+    ) -> dict[str, object]:
+        image_tensor = (
+            torch.from_numpy(crop.image_rgb).float().div(255.0).permute(2, 0, 1)
+        )
+        mask_classes = mask_to_classes(crop.mask_crop)
         mask_tensor = torch.from_numpy(mask_classes)
 
-        scale_x = self._crop_size / float(window_w)
-        scale_y = self._crop_size / float(window_h)
+        x0, y0, _x2, _y2 = window_info.window
+        bbox = window_info.bbox
         bbox_tensor = torch.tensor(
             [
-                float((bbox.x - window_x1) * scale_x),
-                float((bbox.y - window_y1) * scale_y),
-                float((bbox.x + bbox.w - window_x1) * scale_x),
-                float((bbox.y + bbox.h - window_y1) * scale_y),
+                float(bbox.x - x0),
+                float(bbox.y - y0),
+                float(bbox.x + bbox.w - x0),
+                float(bbox.y + bbox.h - y0),
             ],
             dtype=torch.float32,
         )
 
-        result: dict[str, object] = {
+        return {
             "image": image_tensor,
             "mask": mask_tensor,
             "bbox": bbox_tensor,
             "video_id": sample.video_id,
             "frame_id": sample.frame_id,
-            "swapped": swapped,
+            "swapped": crop.swapped,
         }
 
+    def __getitem__(self, idx: int) -> dict[str, object]:
+        sample = self._samples[idx]
+        sample_data = self._load_sample(sample)
+        window_info = self._sample_window(sample_data, idx)
+        crop = self._build_crop(sample_data, window_info, idx)
+        result = self._assemble_output(sample, crop, window_info)
         if self._transform is not None:
             result = self._transform(result)
         return result
