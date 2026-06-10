@@ -129,29 +129,36 @@ def mask_to_classes(mask: np.ndarray) -> np.ndarray:
 def sample_center_from_distance_transform(
     mask: np.ndarray, rng: np.random.Generator, crop_size: int
 ) -> tuple[int, int]:
-    """Return ``(cy, cx)`` sampled with probability proportional to the EDT of ``mask``.
+    """Return ``(cy, cx)`` near the EDT peak of the strict foreground in ``mask``.
 
-    The binary foreground is ``(mask >= 1).astype(uint8)`` (bee body + shadow
-    halo treated as one region). The EDT peak lands inside the bee body;
-    deeper foreground pixels are more likely to be sampled as the crop
-    center. The returned center is clamped so the ``crop_size x crop_size``
+    The binary foreground is the strict foreground ``(mask == 255)``,
+    not the relaxed ``mask >= 1`` (which would include the shadow halo).
+    Using the strict foreground keeps the EDT peak inside the bee body;
+    if the shadow ring were included, the EDT peak could land in the
+    shadow and the crop would miss the bee body entirely. The center
+    starts at the deterministic EDT peak (the pixel with the maximum
+    EDT value) and is then jittered by a small uniform offset drawn
+    from ``rng``. The jitter gives different epochs different crops
+    (data augmentation) while keeping the crop centred on the bee body.
+    The returned center is clamped so the ``crop_size x crop_size``
     window stays in bounds.
 
     Raises ``ValueError`` if the mask has no foreground or if ``crop_size``
     does not fit in the mask shape.
     """
-    foreground = (mask >= 1).astype(np.uint8)
+    foreground = (mask == 255).astype(np.uint8)
     edt = cv2.distanceTransform(foreground, cv2.DIST_L2, 5)
-    flat = edt.ravel().astype(np.float64)
-    total = float(flat.sum())
+    total = float(edt.sum())
     if total <= 0:
         raise ValueError("mask has no foreground — caller should have filtered")
-    choice = rng.choice(flat.size, p=flat / total)
-    cy, cx = np.unravel_index(choice, edt.shape)
+    cy, cx = np.unravel_index(int(np.argmax(edt)), edt.shape)
     height, width = foreground.shape
     half = int(crop_size) // 2
     if half <= 0 or 2 * half > width or 2 * half > height:
         raise ValueError(f"crop_size={crop_size} does not fit in {(height, width)}")
-    cx = int(np.clip(cx, half, width - half - 1))
-    cy = int(np.clip(cy, half, height - half - 1))
+    jitter = 3
+    dx = int(rng.integers(-jitter, jitter + 1))
+    dy = int(rng.integers(-jitter, jitter + 1))
+    cx = int(np.clip(cx + dx, half, width - half - 1))
+    cy = int(np.clip(cy + dy, half, height - half - 1))
     return cy, cx

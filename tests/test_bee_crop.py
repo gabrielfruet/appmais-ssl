@@ -69,7 +69,7 @@ def test_swap_includes_shadow_halo() -> None:
 def test_sample_center_from_distance_transform() -> None:
     """Center is sampled at the EDT peak and clamped to valid bounds."""
     mask = np.zeros((32, 32), dtype=np.uint8)
-    mask[11:21, 11:21] = 1
+    mask[11:21, 11:21] = 255
     rng = np.random.default_rng(0)
     for _ in range(20):
         cy, cx = sample_center_from_distance_transform(mask, rng, crop_size=8)
@@ -82,6 +82,6 @@ def test_sample_center_from_distance_transform() -> None:
         sample_center_from_distance_transform(empty, rng, crop_size=8)
     # Over-large crop_size raises
     small = np.zeros((16, 16), dtype=np.uint8)
-    small[7:9, 7:9] = 1
+    small[7:9, 7:9] = 255
     with pytest.raises(ValueError):
         sample_center_from_distance_transform(small, rng, crop_size=32)

@@ -131,9 +131,11 @@ def test_assemble_output_builds_tensors(tmp_path: object) -> None:
     _write_sample(tmp_path, "vid_a", "frame_with_bee", fg=True)
     ds = BeeCropDataset(str(tmp_path), crop_size=64)
     sample_data = ds._load_sample(ds._samples[0])
+    real_window = ds._sample_window(sample_data, idx=0)
     window_info = _WindowInfo(
         window=(0, 0, 64, 64),
-        bbox=ds._sample_window(sample_data, idx=0).bbox,
+        bbox=real_window.bbox,
+        edt_peak=real_window.edt_peak,
     )
     image_rgb = np.full((64, 64, 3), 255, dtype=np.uint8)
     mask_crop = np.zeros((64, 64), dtype=np.uint8)
@@ -144,6 +146,8 @@ def test_assemble_output_builds_tensors(tmp_path: object) -> None:
     assert output["mask"].dtype == torch.int64
     assert output["image"].shape == (3, 64, 64)
     assert output["mask"].shape == (64, 64)
+    assert output["edt_peak"].dtype == torch.int64
+    assert output["edt_peak"].shape == (2,)
 
 
 def test_load_background_returns_rgb(tmp_path: object) -> None:
