@@ -208,6 +208,27 @@ def save_background_image(
     )
 
 
+def _feed_mog2_pair(
+    mask_subtractor: cv2.BackgroundSubtractor,
+    background_subtractor: cv2.BackgroundSubtractor,
+    frame: np.ndarray,
+    downsample_width: int,
+) -> np.ndarray:
+    """Update both MOG2 instances and return the foreground mask.
+
+    The ``mask_subtractor`` receives a Gaussian-blurred, downsampled
+    frame so its foreground mask is stable. The ``background_subtractor``
+    receives the same downsampled frame *without* the Gaussian blur so
+    its learned background stays sharp for the saved ``background.png``.
+    We only return the mask from the blurred one — the unblurred
+    subtractor's mask is discarded; only its background model is used.
+    """
+    mog2_frame = preprocess_for_mog2(frame, downsample_width)
+    raw_mask = mask_subtractor.apply(mog2_frame)
+    background_subtractor.apply(downsample_for_mog2(frame, downsample_width))
+    return raw_mask
+
+
 def _open_capture(video_path: Path) -> _VideoCaptureInfo:
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -239,6 +260,7 @@ def _extract_with_mog2(
     skip_start_seconds: float,
     mog2_downsample_width: int,
     min_bee_area: int,
+    mask_subtractor: cv2.BackgroundSubtractor,
     background_subtractor: cv2.BackgroundSubtractor,
 ) -> _ExtractionStats:
     export_duration_seconds = capture_info.duration_seconds - skip_start_seconds
@@ -266,8 +288,12 @@ def _extract_with_mog2(
             timestamp_seconds = frame_index / capture_info.fps
             if original_frame_shape is None:
                 original_frame_shape = frame.shape[:2]
-            mog2_frame = preprocess_for_mog2(frame, mog2_downsample_width)
-            raw_mask = background_subtractor.apply(mog2_frame)
+            raw_mask = _feed_mog2_pair(
+                mask_subtractor=mask_subtractor,
+                background_subtractor=background_subtractor,
+                frame=frame,
+                downsample_width=mog2_downsample_width,
+            )
             frame_index += 1
 
             if timestamp_seconds + 1e-9 < next_sample_time:
@@ -426,6 +452,11 @@ def extract_frames(
             return 0
 
         if foreground_masks:
+            mask_subtractor = cv2.createBackgroundSubtractorMOG2(
+                history=mog2_history,
+                varThreshold=mog2_var_threshold,
+                detectShadows=True,
+            )
             background_subtractor = cv2.createBackgroundSubtractorMOG2(
                 history=mog2_history,
                 varThreshold=mog2_var_threshold,
@@ -443,6 +474,7 @@ def extract_frames(
                 skip_start_seconds=skip_start_seconds,
                 mog2_downsample_width=mog2_downsample_width,
                 min_bee_area=min_bee_area,
+                mask_subtractor=mask_subtractor,
                 background_subtractor=background_subtractor,
             )
             if save_background:
@@ -564,9 +596,12 @@ def extract_frames(
     help=(
         "After the MOG2 loop finishes, write the learned background image "
         "to <video_output_dir>/background.png as a BGR PNG. The image is "
-        "upscaled with INTER_CUBIC to the full frame resolution (e.g. "
-        "640x480), so consumers can paste bee crops onto a sharp scene. "
-        "Requires --foreground-masks; ignored otherwise."
+        "produced by a second MOG2 trained on unblurred (sharp), "
+        "downsampled frames, then upscaled with INTER_CUBIC to the full "
+        "frame resolution (e.g. 640x480). The foreground-mask MOG2 is "
+        "trained on Gaussian-blurred frames for stable detection, but its "
+        "background is *not* used here. Requires --foreground-masks; "
+        "ignored otherwise."
     ),
 )
 @click.option(
