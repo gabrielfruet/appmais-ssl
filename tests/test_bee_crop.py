@@ -49,6 +49,23 @@ def test_build_swapped_crop_resizes_background() -> None:
     assert swapped.shape == (40, 40, 3) and (swapped[0:10, :] == 200).all()
 
 
+def test_swap_includes_shadow_halo() -> None:
+    """`build_swapped_crop` uses `mask >= 127` (shadow + foreground)."""
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    img[40:60, 40:60] = (10, 20, 30)  # dark "bee" body
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[40:60, 40:60] = 255  # foreground
+    mask[38:40, 38:62] = 127  # shadow ring (top edge only)
+    bg = np.full((100, 100, 3), 200, dtype=np.uint8)
+    swapped, _ = build_swapped_crop(img, mask, bg, (30, 30, 70, 70), 40)
+    # Top shadow ring lands in the crop at [8:10, 8:32]; the ring must come
+    # from the source image (0, 0, 0), not the background (200, 200, 200).
+    assert (swapped[8:10, 8:32] == 0).all(), (
+        f"shadow ring pixel {swapped[8:10, 8:32][0]} should be the "
+        "source image (0, 0, 0), not the background (200, 200, 200)"
+    )
+
+
 def test_sample_center_from_distance_transform() -> None:
     """Center is sampled at the EDT peak and clamped to valid bounds."""
     mask = np.zeros((32, 32), dtype=np.uint8)

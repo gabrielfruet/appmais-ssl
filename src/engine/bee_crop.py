@@ -106,7 +106,7 @@ def build_swapped_crop(
     mask_crop = crop_with_border(mask, window)
     background_crop = crop_with_border(background, window)
 
-    foreground = mask_crop == 255
+    foreground = mask_crop >= 127
     swapped = np.where(foreground[..., None], image_crop, background_crop)
 
     swapped_resized = cv2.resize(
