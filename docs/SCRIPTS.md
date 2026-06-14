@@ -113,6 +113,23 @@ Useful options:
 
 The swap uses the MOG2 mask values `127` (shadow) and `255` (foreground) as the in-bee region (`mask >= 127`), so the bee is copied from the source frame together with its natural shadow halo. This naturally feathers the cut-out edge between the bee and the new background.
 
+## `scripts/dinov3_pca_patch_rgb.py`
+
+Visualizes one image with DINOv3 ViT-Large patch embeddings. It computes CLS-vs-patch cosine similarity, masks low-similarity patches, runs PCA on the remaining patch embeddings, and maps the first three PCA components to RGB.
+
+```bash
+uv run python scripts/dinov3_pca_patch_rgb.py beehive_entrance.jpg outputs/beehive_pca.png \
+    --mask-output outputs/beehive_mask.png
+```
+
+Useful options:
+
+- `--model-name vit_large_patch16_dinov3`: timm DINOv3 model to use.
+- `--threshold 0.6`: normalized CLS-vs-patch similarity threshold; lower values keep more patches.
+- `--mask-output PATH`: optionally save the binary relevant-patch mask.
+
+The script automatically uses CUDA, then MPS, then CPU. Masked patches are rendered black; unmasked patches are colored by the first three PCA components and upsampled to the original image size with nearest-neighbor interpolation.
+
 ## `scripts/dino_video_heatmap.py`
 
 Creates a DINO-style heatmap overlay video from an input video using CLS-vs-patch cosine similarity.
