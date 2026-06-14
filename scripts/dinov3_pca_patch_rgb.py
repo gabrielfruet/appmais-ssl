@@ -28,28 +28,44 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def image_size_for_model(model: Any) -> int:
-    input_size = model.default_cfg.get("input_size", (3, 256, 256))
-    height = int(input_size[1])
-    width = int(input_size[2])
-    if height != width:
-        raise click.ClickException(
-            f"Expected a square model input size, got {input_size}"
-        )
-    return height
+def patch_size_for_model(model: Any) -> tuple[int, int]:
+    patch_embed = getattr(model, "patch_embed", None)
+    patch_size = getattr(patch_embed, "patch_size", (16, 16))
+    return int(patch_size[0]), int(patch_size[1])
+
+
+def pad_to_patch_multiple(
+    image_bgr: np.ndarray, patch_size: tuple[int, int]
+) -> tuple[np.ndarray, tuple[int, int]]:
+    height, width = image_bgr.shape[:2]
+    patch_h, patch_w = patch_size
+    padded_h = ((height + patch_h - 1) // patch_h) * patch_h
+    padded_w = ((width + patch_w - 1) // patch_w) * patch_w
+    pad_bottom = padded_h - height
+    pad_right = padded_w - width
+    if pad_bottom == 0 and pad_right == 0:
+        return image_bgr, (padded_h, padded_w)
+
+    padded = cv2.copyMakeBorder(
+        image_bgr,
+        0,
+        pad_bottom,
+        0,
+        pad_right,
+        borderType=cv2.BORDER_REFLECT_101,
+    )
+    return padded, (padded_h, padded_w)
 
 
 def image_to_tensor(
-    image_bgr: np.ndarray, image_size: int, device: torch.device
-) -> torch.Tensor:
+    image_bgr: np.ndarray, patch_size: tuple[int, int], device: torch.device
+) -> tuple[torch.Tensor, tuple[int, int]]:
+    image_bgr, padded_size = pad_to_patch_multiple(image_bgr, patch_size)
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    image_rgb = cv2.resize(
-        image_rgb, (image_size, image_size), interpolation=cv2.INTER_CUBIC
-    )
     image = image_rgb.astype(np.float32) / 255.0
     image = (image - IMAGENET_MEAN) / IMAGENET_STD
     image = np.transpose(image, (2, 0, 1))
-    return torch.from_numpy(image).unsqueeze(0).to(device)
+    return torch.from_numpy(image).unsqueeze(0).to(device), padded_size
 
 
 def cls_and_patch_tokens_from_features(
@@ -64,14 +80,22 @@ def cls_and_patch_tokens_from_features(
     return features[:, 0, :], features[:, prefix_tokens:, :]
 
 
-def patch_grid_size(patch_tokens: torch.Tensor) -> int:
+def patch_grid_shape(
+    patch_tokens: torch.Tensor,
+    padded_size: tuple[int, int],
+    patch_size: tuple[int, int],
+) -> tuple[int, int]:
+    padded_h, padded_w = padded_size
+    patch_h, patch_w = patch_size
+    grid_h = padded_h // patch_h
+    grid_w = padded_w // patch_w
     patch_count = patch_tokens.shape[1]
-    grid_size = int(patch_count**0.5)
-    if grid_size * grid_size != patch_count:
+    if grid_h * grid_w != patch_count:
         raise click.ClickException(
-            f"Expected a square patch grid, got {patch_count} patch tokens"
+            f"Expected {grid_h}x{grid_w}={grid_h * grid_w} patch tokens, "
+            f"got {patch_count}"
         )
-    return grid_size
+    return grid_h, grid_w
 
 
 def minmax(values: torch.Tensor) -> torch.Tensor:
@@ -97,11 +121,11 @@ def pca_rgb_for_selected_patches(selected_embeddings: torch.Tensor) -> torch.Ten
 def make_pca_visualization(
     image_bgr: np.ndarray,
     model: Any,
-    image_size: int,
     device: torch.device,
     threshold: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    tensor = image_to_tensor(image_bgr, image_size, device)
+    patch_size = patch_size_for_model(model)
+    tensor, padded_size = image_to_tensor(image_bgr, patch_size, device)
 
     with torch.inference_mode():
         features = model.forward_features(tensor)
@@ -115,25 +139,26 @@ def make_pca_visualization(
     selected_embeddings = patch_tokens[0, keep_mask].detach().cpu()
     selected_rgb = pca_rgb_for_selected_patches(selected_embeddings)
 
-    grid_size = patch_grid_size(patch_tokens)
+    grid_h, grid_w = patch_grid_shape(patch_tokens, padded_size, patch_size)
     patch_rgb = torch.zeros((patch_tokens.shape[1], 3), dtype=torch.float32)
     patch_rgb[keep_mask.cpu()] = selected_rgb
-    patch_rgb_image = patch_rgb.reshape(grid_size, grid_size, 3).numpy()
+    patch_rgb_image = patch_rgb.reshape(grid_h, grid_w, 3).numpy()
 
-    patch_mask = (
-        keep_mask.reshape(grid_size, grid_size).cpu().numpy().astype(np.uint8) * 255
-    )
-    output_rgb = cv2.resize(
+    patch_mask = keep_mask.reshape(grid_h, grid_w).cpu().numpy().astype(np.uint8) * 255
+    padded_h, padded_w = padded_size
+    output_rgb_padded = cv2.resize(
         (patch_rgb_image * 255).astype(np.uint8),
-        (image_bgr.shape[1], image_bgr.shape[0]),
+        (padded_w, padded_h),
         interpolation=cv2.INTER_NEAREST,
     )
+    output_rgb = output_rgb_padded[: image_bgr.shape[0], : image_bgr.shape[1]]
     output_bgr = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2BGR)
-    mask = cv2.resize(
+    mask_padded = cv2.resize(
         patch_mask,
-        (image_bgr.shape[1], image_bgr.shape[0]),
+        (padded_w, padded_h),
         interpolation=cv2.INTER_NEAREST,
     )
+    mask = mask_padded[: image_bgr.shape[0], : image_bgr.shape[1]]
     return output_bgr, mask
 
 
@@ -176,12 +201,10 @@ def main(
     click.echo(f"Loading {model_name} on {device}...")
     model = timm.create_model(model_name, pretrained=True, num_classes=0).to(device)
     model.eval()
-    image_size = image_size_for_model(model)
 
     output_bgr, mask = make_pca_visualization(
         image_bgr=image_bgr,
         model=model,
-        image_size=image_size,
         device=device,
         threshold=threshold,
     )
