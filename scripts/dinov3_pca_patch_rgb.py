@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 MODEL_NAME = "vit_large_patch16_dinov3"
 THRESHOLD = 0.6
+INFERENCE_MAX_SIZE = 768
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -55,6 +56,22 @@ def pad_to_patch_multiple(
         borderType=cv2.BORDER_REFLECT_101,
     )
     return padded, (padded_h, padded_w)
+
+
+def resize_for_inference(image_bgr: np.ndarray, inference_max_size: int) -> np.ndarray:
+    height, width = image_bgr.shape[:2]
+    largest_side = max(height, width)
+    scale = min(1.0, inference_max_size / largest_side)
+    if scale == 1.0:
+        return image_bgr
+
+    resized_width = max(1, round(width * scale))
+    resized_height = max(1, round(height * scale))
+    return cv2.resize(
+        image_bgr,
+        (resized_width, resized_height),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 def image_to_tensor(
@@ -123,9 +140,13 @@ def make_pca_visualization(
     model: Any,
     device: torch.device,
     threshold: float,
+    inference_max_size: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    original_h, original_w = image_bgr.shape[:2]
+    inference_bgr = resize_for_inference(image_bgr, inference_max_size)
+    inference_h, inference_w = inference_bgr.shape[:2]
     patch_size = patch_size_for_model(model)
-    tensor, padded_size = image_to_tensor(image_bgr, patch_size, device)
+    tensor, padded_size = image_to_tensor(inference_bgr, patch_size, device)
 
     with torch.inference_mode():
         features = model.forward_features(tensor)
@@ -144,21 +165,34 @@ def make_pca_visualization(
     patch_rgb[keep_mask.cpu()] = selected_rgb
     patch_rgb_image = patch_rgb.reshape(grid_h, grid_w, 3).numpy()
 
-    patch_mask = keep_mask.reshape(grid_h, grid_w).cpu().numpy().astype(np.uint8) * 255
+    patch_mask = keep_mask.reshape(grid_h, grid_w).cpu().numpy().astype(np.float32)
     padded_h, padded_w = padded_size
-    output_rgb_padded = cv2.resize(
-        (patch_rgb_image * 255).astype(np.uint8),
+    output_rgb = cv2.resize(
+        patch_rgb_image,
         (padded_w, padded_h),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    output_rgb = output_rgb_padded[: image_bgr.shape[0], : image_bgr.shape[1]]
-    output_bgr = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2BGR)
-    mask_padded = cv2.resize(
+        interpolation=cv2.INTER_CUBIC,
+    )[:inference_h, :inference_w]
+    mask_float = cv2.resize(
         patch_mask,
         (padded_w, padded_h),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    mask = mask_padded[: image_bgr.shape[0], : image_bgr.shape[1]]
+        interpolation=cv2.INTER_CUBIC,
+    )[:inference_h, :inference_w]
+
+    if (inference_h, inference_w) != (original_h, original_w):
+        output_rgb = cv2.resize(
+            output_rgb,
+            (original_w, original_h),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        mask_float = cv2.resize(
+            mask_float,
+            (original_w, original_h),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+    output_rgb = np.clip(output_rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+    output_bgr = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2BGR)
+    mask = (mask_float >= 0.5).astype(np.uint8) * 255
     return output_bgr, mask
 
 
@@ -186,12 +220,23 @@ def make_pca_visualization(
     default=None,
     help="Optional path to save the binary relevant-patch mask.",
 )
+@click.option(
+    "--inference-max-size",
+    type=click.IntRange(16),
+    default=INFERENCE_MAX_SIZE,
+    show_default=True,
+    help=(
+        "Downsample the largest input side to at most this many pixels before "
+        "DINO inference."
+    ),
+)
 def main(
     input_image: Path,
     output_image: Path,
     model_name: str,
     threshold: float,
     mask_output: Path | None,
+    inference_max_size: int,
 ) -> None:
     image_bgr = cv2.imread(str(input_image), cv2.IMREAD_COLOR)
     if image_bgr is None:
@@ -207,6 +252,7 @@ def main(
         model=model,
         device=device,
         threshold=threshold,
+        inference_max_size=inference_max_size,
     )
 
     output_image.parent.mkdir(parents=True, exist_ok=True)

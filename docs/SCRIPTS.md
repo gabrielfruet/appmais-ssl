@@ -127,8 +127,9 @@ Useful options:
 - `--model-name vit_large_patch16_dinov3`: timm DINOv3 model to use.
 - `--threshold 0.6`: normalized CLS-vs-patch similarity threshold; lower values keep more patches.
 - `--mask-output PATH`: optionally save the binary relevant-patch mask.
+- `--inference-max-size 768`: downsample the largest input side before DINO inference.
 
-The script automatically uses CUDA, then MPS, then CPU. It runs the model at the input image resolution instead of resizing to the model default size; images whose height or width is not divisible by the patch size are reflect-padded only to the next patch multiple and cropped back after rendering. Masked patches are rendered black; unmasked patches are colored by the first three PCA components and upsampled to the original image size with nearest-neighbor interpolation.
+The script automatically uses CUDA, then MPS, then CPU. It downsamples large images before DINO inference, pads only to the next patch multiple when needed, renders masked patches as black, and upsamples the PCA RGB image back to the original input size with bicubic interpolation.
 
 ## `scripts/dino_video_heatmap.py`
 
