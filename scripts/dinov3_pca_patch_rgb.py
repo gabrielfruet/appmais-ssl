@@ -140,15 +140,13 @@ def pca_rgb_for_selected_patches(selected_embeddings: torch.Tensor) -> torch.Ten
     return rgb
 
 
-def make_pca_visualization(
+def compute_pca_artifacts(
     image_bgr: np.ndarray,
     model: Any,
     device: torch.device,
-    threshold: float,
     inference_max_size: int,
-    upsample_method: int,
     inference_dtype: torch.dtype,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> dict[str, Any]:
     original_h, original_w = image_bgr.shape[:2]
     inference_bgr = resize_for_inference(image_bgr, inference_max_size)
     inference_h, inference_w = inference_bgr.shape[:2]
@@ -168,27 +166,56 @@ def make_pca_visualization(
         similarities = torch.nan_to_num(similarities, nan=0.0, posinf=1.0, neginf=-1.0)
 
     normalized_similarities = minmax(similarities.float())
+    grid_h, grid_w = patch_grid_shape(patch_tokens, padded_size, patch_size)
+    return {
+        "patch_tokens_cpu": patch_tokens[0].detach().cpu().float(),
+        "normalized_similarities": normalized_similarities.cpu().numpy(),
+        "grid_h": grid_h,
+        "grid_w": grid_w,
+        "inference_h": inference_h,
+        "inference_w": inference_w,
+        "original_h": original_h,
+        "original_w": original_w,
+    }
+
+
+def render_threshold_visualization(
+    artifacts: dict[str, Any],
+    threshold: float,
+    upsample_method: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    patch_tokens = artifacts["patch_tokens_cpu"]
+    normalized_similarities = torch.from_numpy(artifacts["normalized_similarities"])
+    grid_h = int(artifacts["grid_h"])
+    grid_w = int(artifacts["grid_w"])
+    inference_h = int(artifacts["inference_h"])
+    inference_w = int(artifacts["inference_w"])
+    original_h = int(artifacts["original_h"])
+    original_w = int(artifacts["original_w"])
+
     keep_mask = normalized_similarities >= threshold
-    selected_embeddings = patch_tokens[0, keep_mask].detach().cpu()
+    selected_embeddings = patch_tokens[keep_mask]
+    if selected_embeddings.shape[0] < 3:
+        raise click.ClickException(
+            f"Threshold {threshold} kept fewer than 3 patches; lower --threshold."
+        )
     selected_rgb = pca_rgb_for_selected_patches(selected_embeddings)
 
-    grid_h, grid_w = patch_grid_shape(patch_tokens, padded_size, patch_size)
-    patch_rgb = torch.zeros((patch_tokens.shape[1], 3), dtype=torch.float32)
-    patch_rgb[keep_mask.cpu()] = selected_rgb
+    patch_rgb = torch.zeros((patch_tokens.shape[0], 3), dtype=torch.float32)
+    patch_rgb[keep_mask] = selected_rgb
     patch_rgb_image = patch_rgb.reshape(grid_h, grid_w, 3).numpy()
+    patch_mask = keep_mask.reshape(grid_h, grid_w).numpy().astype(np.float32)
 
-    patch_mask = keep_mask.reshape(grid_h, grid_w).cpu().numpy().astype(np.float32)
-    padded_h, padded_w = padded_size
     output_rgb = cv2.resize(
         patch_rgb_image,
-        (padded_w, padded_h),
+        (inference_w, inference_h),
         interpolation=upsample_method,
-    )[:inference_h, :inference_w]
+    )
     mask_float = cv2.resize(
         patch_mask,
-        (padded_w, padded_h),
+        (inference_w, inference_h),
         interpolation=upsample_method,
-    )[:inference_h, :inference_w]
+    )
 
     if (inference_h, inference_w) != (original_h, original_w):
         output_rgb = cv2.resize(
@@ -206,6 +233,29 @@ def make_pca_visualization(
     output_bgr = cv2.cvtColor(output_rgb, cv2.COLOR_RGB2BGR)
     mask = (mask_float >= 0.5).astype(np.uint8) * 255
     return output_bgr, mask
+
+
+def make_pca_visualization(
+    image_bgr: np.ndarray,
+    model: Any,
+    device: torch.device,
+    threshold: float,
+    inference_max_size: int,
+    upsample_method: int,
+    inference_dtype: torch.dtype,
+) -> tuple[np.ndarray, np.ndarray]:
+    artifacts = compute_pca_artifacts(
+        image_bgr=image_bgr,
+        model=model,
+        device=device,
+        inference_max_size=inference_max_size,
+        inference_dtype=inference_dtype,
+    )
+    return render_threshold_visualization(
+        artifacts=artifacts,
+        threshold=threshold,
+        upsample_method=upsample_method,
+    )
 
 
 @click.command()
@@ -264,6 +314,16 @@ def make_pca_visualization(
         "accurate but slowest."
     ),
 )
+@click.option(
+    "--threshold-list",
+    default=None,
+    help=(
+        "Comma-separated thresholds (e.g. '0.1,0.2,0.3,0.4,0.5'). When set, the "
+        "script runs DINO inference once and writes one output per threshold; "
+        "the value of --threshold is ignored. Output paths look like "
+        "<output_image-without-ext>_t<threshold*100>.<ext>."
+    ),
+)
 def main(
     input_image: Path,
     output_image: Path,
@@ -273,6 +333,7 @@ def main(
     inference_max_size: int,
     upsample_method: str,
     inference_dtype: str,
+    threshold_list: str | None,
 ) -> None:
     image_bgr = cv2.imread(str(input_image), cv2.IMREAD_COLOR)
     if image_bgr is None:
@@ -298,28 +359,79 @@ def main(
         "lanczos4": cv2.INTER_LANCZOS4,
     }[upsample_method.lower()]
 
-    output_bgr, mask = make_pca_visualization(
-        image_bgr=image_bgr,
-        model=model,
-        device=device,
-        threshold=threshold,
-        inference_max_size=inference_max_size,
-        upsample_method=upsample_flag,
-        inference_dtype=model_dtype,
-    )
+    thresholds: list[float]
+    if threshold_list is None:
+        thresholds = [threshold]
+    else:
+        try:
+            thresholds = [float(part) for part in threshold_list.split(",") if part]
+        except ValueError as exc:
+            bad = threshold_list
+            raise click.ClickException(
+                f"--threshold-list must be comma-separated floats; got {bad!r}"
+            ) from exc
+        if not thresholds:
+            raise click.ClickException(
+                "--threshold-list must contain at least one value"
+            )
 
-    output_image.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(output_image), output_bgr):
-        raise click.ClickException(f"Could not write output image: {output_image}")
+    artifacts: dict[str, Any] | None = None
+    if len(thresholds) > 1:
+        click.echo("Computing DINO features once for threshold sweep...")
+        artifacts = compute_pca_artifacts(
+            image_bgr=image_bgr,
+            model=model,
+            device=device,
+            inference_max_size=inference_max_size,
+            inference_dtype=model_dtype,
+        )
 
-    if mask_output is not None:
-        mask_output.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(mask_output), mask):
-            raise click.ClickException(f"Could not write mask image: {mask_output}")
+    stem = output_image.with_suffix("")
+    suffix = output_image.suffix or ".png"
+    for t in thresholds:
+        if artifacts is None:
+            output_bgr, mask = make_pca_visualization(
+                image_bgr=image_bgr,
+                model=model,
+                device=device,
+                threshold=t,
+                inference_max_size=inference_max_size,
+                upsample_method=upsample_flag,
+                inference_dtype=model_dtype,
+            )
+        else:
+            output_bgr, mask = render_threshold_visualization(
+                artifacts=artifacts,
+                threshold=t,
+                upsample_method=upsample_flag,
+            )
 
-    kept = int(np.count_nonzero(mask))
-    total = int(mask.size)
-    click.echo(f"Wrote {output_image} with {kept / total:.1%} relevant pixels.")
+        target_path = (
+            output_image
+            if len(thresholds) == 1
+            else Path(f"{stem}_t{int(round(t * 100)):03d}{suffix}")
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(target_path), output_bgr):
+            raise click.ClickException(f"Could not write output image: {target_path}")
+
+        if mask_output is not None:
+            mask_suffix = mask_output.suffix or ".png"
+            mask_stem = mask_output.with_suffix("")
+            mask_path = (
+                mask_output
+                if len(thresholds) == 1
+                else Path(f"{mask_stem}_t{int(round(t * 100)):03d}{mask_suffix}")
+            )
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(mask_path), mask):
+                raise click.ClickException(f"Could not write mask image: {mask_path}")
+
+        kept = int(np.count_nonzero(mask))
+        total = int(mask.size)
+        click.echo(
+            f"Wrote {target_path} (t={t}) with {kept / total:.1%} relevant pixels."
+        )
 
 
 if __name__ == "__main__":
