@@ -17,6 +17,7 @@ import torch.nn.functional as F
 MODEL_NAME = "vit_large_patch16_dinov3"
 THRESHOLD = 0.6
 INFERENCE_MAX_SIZE = 768
+UPSAMPLE_METHOD = "nearest"
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -141,6 +142,7 @@ def make_pca_visualization(
     device: torch.device,
     threshold: float,
     inference_max_size: int,
+    upsample_method: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     original_h, original_w = image_bgr.shape[:2]
     inference_bgr = resize_for_inference(image_bgr, inference_max_size)
@@ -170,24 +172,24 @@ def make_pca_visualization(
     output_rgb = cv2.resize(
         patch_rgb_image,
         (padded_w, padded_h),
-        interpolation=cv2.INTER_CUBIC,
+        interpolation=upsample_method,
     )[:inference_h, :inference_w]
     mask_float = cv2.resize(
         patch_mask,
         (padded_w, padded_h),
-        interpolation=cv2.INTER_CUBIC,
+        interpolation=upsample_method,
     )[:inference_h, :inference_w]
 
     if (inference_h, inference_w) != (original_h, original_w):
         output_rgb = cv2.resize(
             output_rgb,
             (original_w, original_h),
-            interpolation=cv2.INTER_CUBIC,
+            interpolation=upsample_method,
         )
         mask_float = cv2.resize(
             mask_float,
             (original_w, original_h),
-            interpolation=cv2.INTER_CUBIC,
+            interpolation=upsample_method,
         )
 
     output_rgb = np.clip(output_rgb * 255.0, 0.0, 255.0).astype(np.uint8)
@@ -230,6 +232,16 @@ def make_pca_visualization(
         "DINO inference."
     ),
 )
+@click.option(
+    "--upsample-method",
+    type=click.Choice(["nearest", "bilinear", "bicubic"], case_sensitive=False),
+    default=UPSAMPLE_METHOD,
+    show_default=True,
+    help=(
+        "OpenCV interpolation used to upsample the PCA RGB and mask to the "
+        "original input size."
+    ),
+)
 def main(
     input_image: Path,
     output_image: Path,
@@ -237,6 +249,7 @@ def main(
     threshold: float,
     mask_output: Path | None,
     inference_max_size: int,
+    upsample_method: str,
 ) -> None:
     image_bgr = cv2.imread(str(input_image), cv2.IMREAD_COLOR)
     if image_bgr is None:
@@ -247,12 +260,19 @@ def main(
     model = timm.create_model(model_name, pretrained=True, num_classes=0).to(device)
     model.eval()
 
+    upsample_flag = {
+        "nearest": cv2.INTER_NEAREST,
+        "bilinear": cv2.INTER_LINEAR,
+        "bicubic": cv2.INTER_CUBIC,
+    }[upsample_method.lower()]
+
     output_bgr, mask = make_pca_visualization(
         image_bgr=image_bgr,
         model=model,
         device=device,
         threshold=threshold,
         inference_max_size=inference_max_size,
+        upsample_method=upsample_flag,
     )
 
     output_image.parent.mkdir(parents=True, exist_ok=True)

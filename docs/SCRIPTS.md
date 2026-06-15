@@ -128,8 +128,9 @@ Useful options:
 - `--threshold 0.6`: normalized CLS-vs-patch similarity threshold; lower values keep more patches.
 - `--mask-output PATH`: optionally save the binary relevant-patch mask.
 - `--inference-max-size 768`: downsample the largest input side before DINO inference.
+- `--upsample-method nearest`: OpenCV interpolation used to upsample the PCA RGB and mask to the original input size. Choices: `nearest`, `bilinear`, `bicubic`.
 
-The script automatically uses CUDA, then MPS, then CPU. It downsamples large images before DINO inference, pads only to the next patch multiple when needed, renders masked patches as black, and upsamples the PCA RGB image back to the original input size with bicubic interpolation.
+The script automatically uses CUDA, then MPS, then CPU. It downsamples large images before DINO inference, pads only to the next patch multiple when needed, renders masked patches as black, and upsamples the PCA RGB image back to the original input size with the selected interpolation.
 
 ## `scripts/dino_video_heatmap.py`
 
