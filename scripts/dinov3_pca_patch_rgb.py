@@ -15,9 +15,10 @@ import torch
 import torch.nn.functional as F
 
 MODEL_NAME = "vit_large_patch16_dinov3"
-THRESHOLD = 0.6
+THRESHOLD = 0.0
 INFERENCE_MAX_SIZE = 1024
 UPSAMPLE_METHOD = "nearest"
+UPSAMPLE_METHOD_CHOICES = ["nearest", "bilinear", "bicubic", "lanczos4"]
 INFERENCE_DTYPE = "bfloat16"
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -243,7 +244,7 @@ def make_pca_visualization(
 )
 @click.option(
     "--upsample-method",
-    type=click.Choice(["nearest", "bilinear", "bicubic"], case_sensitive=False),
+    type=click.Choice(UPSAMPLE_METHOD_CHOICES, case_sensitive=False),
     default=UPSAMPLE_METHOD,
     show_default=True,
     help=(
@@ -294,6 +295,7 @@ def main(
         "nearest": cv2.INTER_NEAREST,
         "bilinear": cv2.INTER_LINEAR,
         "bicubic": cv2.INTER_CUBIC,
+        "lanczos4": cv2.INTER_LANCZOS4,
     }[upsample_method.lower()]
 
     output_bgr, mask = make_pca_visualization(
