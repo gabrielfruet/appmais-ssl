@@ -16,8 +16,9 @@ import torch.nn.functional as F
 
 MODEL_NAME = "vit_large_patch16_dinov3"
 THRESHOLD = 0.6
-INFERENCE_MAX_SIZE = 768
+INFERENCE_MAX_SIZE = 1024
 UPSAMPLE_METHOD = "nearest"
+INFERENCE_DTYPE = "bfloat16"
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -126,9 +127,11 @@ def pca_rgb_for_selected_patches(selected_embeddings: torch.Tensor) -> torch.Ten
             "Threshold kept fewer than 3 patches; lower --threshold and try again."
         )
 
-    centered = selected_embeddings - selected_embeddings.mean(dim=0, keepdim=True)
-    _, _, vh = torch.linalg.svd(centered.float(), full_matrices=False)
-    scores = centered.float() @ vh[:3].T
+    centered = selected_embeddings.float() - selected_embeddings.float().mean(
+        dim=0, keepdim=True
+    )
+    _, _, vh = torch.linalg.svd(centered, full_matrices=False)
+    scores = centered @ vh[:3].T
 
     rgb = torch.empty_like(scores)
     for channel in range(3):
@@ -143,19 +146,25 @@ def make_pca_visualization(
     threshold: float,
     inference_max_size: int,
     upsample_method: int,
+    inference_dtype: torch.dtype,
 ) -> tuple[np.ndarray, np.ndarray]:
     original_h, original_w = image_bgr.shape[:2]
     inference_bgr = resize_for_inference(image_bgr, inference_max_size)
     inference_h, inference_w = inference_bgr.shape[:2]
     patch_size = patch_size_for_model(model)
     tensor, padded_size = image_to_tensor(inference_bgr, patch_size, device)
+    if tensor.is_floating_point():
+        tensor = tensor.to(dtype=inference_dtype)
 
     with torch.inference_mode():
         features = model.forward_features(tensor)
         cls_token, patch_tokens = cls_and_patch_tokens_from_features(features, model)
         similarities = F.cosine_similarity(
-            patch_tokens, cls_token.unsqueeze(1).expand_as(patch_tokens), dim=-1
+            patch_tokens.float(),
+            cls_token.float().unsqueeze(1).expand_as(patch_tokens),
+            dim=-1,
         )[0]
+        similarities = torch.nan_to_num(similarities, nan=0.0, posinf=1.0, neginf=-1.0)
 
     normalized_similarities = minmax(similarities.float())
     keep_mask = normalized_similarities >= threshold
@@ -242,6 +251,18 @@ def make_pca_visualization(
         "original input size."
     ),
 )
+@click.option(
+    "--inference-dtype",
+    type=click.Choice(["float32", "float16", "bfloat16"], case_sensitive=False),
+    default=INFERENCE_DTYPE,
+    show_default=True,
+    help=(
+        "Dtype used to load the DINO model and run forward inference. "
+        "`bfloat16` is the recommended reduced-precision dtype (DINOv3's rotary "
+        "embeddings can produce NaNs in plain `float16`); `float32` is the most "
+        "accurate but slowest."
+    ),
+)
 def main(
     input_image: Path,
     output_image: Path,
@@ -250,14 +271,23 @@ def main(
     mask_output: Path | None,
     inference_max_size: int,
     upsample_method: str,
+    inference_dtype: str,
 ) -> None:
     image_bgr = cv2.imread(str(input_image), cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise click.ClickException(f"Could not read input image: {input_image}")
 
     device = pick_device()
-    click.echo(f"Loading {model_name} on {device}...")
-    model = timm.create_model(model_name, pretrained=True, num_classes=0).to(device)
+    click.echo(f"Loading {model_name} on {device} ({inference_dtype})...")
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    model_dtype = dtype_map[inference_dtype.lower()]
+    model = timm.create_model(model_name, pretrained=True, num_classes=0).to(
+        device=device, dtype=model_dtype
+    )
     model.eval()
 
     upsample_flag = {
@@ -273,6 +303,7 @@ def main(
         threshold=threshold,
         inference_max_size=inference_max_size,
         upsample_method=upsample_flag,
+        inference_dtype=model_dtype,
     )
 
     output_image.parent.mkdir(parents=True, exist_ok=True)
