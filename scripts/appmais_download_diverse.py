@@ -31,6 +31,7 @@ class Args(argparse.Namespace):
     end_date: dt.date | None
     delay: float
     max_retries: int
+    max_consecutive_unavailable: int
 
 
 class ManifestRecord(TypedDict):
@@ -95,6 +96,7 @@ def main() -> None:
                 save_state(state_path, signature, day_index + 1)
                 continue
 
+            consecutive_unavailable = 0
             for time in diverse_times(times, args.per_day, args.seed, hive, day):
                 if downloaded_total >= args.count or day_successes >= args.per_day:
                     break
@@ -113,10 +115,21 @@ def main() -> None:
                     downloaded_total += 1
                     day_successes += 1
                     downloaded_by_day[(hive, day)] = day_successes
+                    consecutive_unavailable = 0
                     print(f"  downloaded {time} ({downloaded_total}/{args.count})")
                 else:
+                    consecutive_unavailable += 1
                     reason = result.get("reason", "unknown")
                     print(f"  {result['status']} {time}: {reason}")
+                    if (
+                        args.max_consecutive_unavailable > 0
+                        and consecutive_unavailable >= args.max_consecutive_unavailable
+                    ):
+                        print(
+                            f"  bail: {consecutive_unavailable} consecutive "
+                            f"unavailable for {hive} {day}"
+                        )
+                        break
 
             save_state(state_path, signature, day_index + 1)
 
@@ -180,6 +193,16 @@ def parse_args() -> Args:
         type=non_negative_int,
         default=5,
         help="Retries for HTTP 429 rate-limit responses.",
+    )
+    parser.add_argument(
+        "--max-consecutive-unavailable",
+        type=non_negative_int,
+        default=3,
+        help=(
+            "Move to the next hive/day after this many consecutive "
+            "'unavailable' results in a row. 0 disables the bail. The "
+            "counter resets on each successful download."
+        ),
     )
     return cast(Args, parser.parse_args())
 
