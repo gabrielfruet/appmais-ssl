@@ -7,8 +7,10 @@ Usage:
         --videos-file data/curated_videos.txt
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 import cv2
@@ -407,6 +409,17 @@ def _extract_without_mog2(
     return _ExtractionStats(saved_count=saved_count, sampled_count=sampled_count)
 
 
+def _safe_extract_video(
+    job: tuple[Callable[..., int], Path],
+) -> tuple[Path, int, str | None]:
+    """Run a single ``extract_frames`` job in a worker process, capturing errors."""
+    worker_fn, video_path = job
+    try:
+        return (video_path, int(worker_fn(video_path)), None)
+    except Exception as exc:  # noqa: BLE001 - want to surface any per-video failure
+        return (video_path, 0, f"{type(exc).__name__}: {exc}")
+
+
 def extract_frames(
     video_path: Path,
     output_dir: Path,
@@ -628,6 +641,18 @@ def extract_frames(
         "back to the exported frame size."
     ),
 )
+@click.option(
+    "--workers",
+    type=click.IntRange(1, 64),
+    default=1,
+    show_default=True,
+    help=(
+        "Number of worker processes for per-video extraction. "
+        "1 keeps the original sequential behavior; 2-8 is a good range "
+        "for a multi-core machine. Per-video failures are caught and "
+        "logged without aborting the batch."
+    ),
+)
 def main(
     input_path: Path,
     output_dir: Path,
@@ -645,6 +670,7 @@ def main(
     mog2_downsample_width: int,
     videos_file: Path | None = None,
     min_bee_area: int = 50,
+    workers: int = 1,
 ) -> None:
     if sample_every_seconds <= 0.0:
         raise click.ClickException("--sample-every-seconds must be positive")
@@ -674,25 +700,46 @@ def main(
         videos = find_videos(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    worker_kwargs: dict[str, Any] = dict(
+        output_dir=output_dir,
+        sample_every_seconds=sample_every_seconds,
+        diff_threshold=diff_threshold,
+        min_gap_seconds=min_gap_seconds,
+        max_frames=max_frames_per_video,
+        jpeg_quality=jpeg_quality,
+        skip_start_seconds=skip_start_seconds,
+        overwrite=overwrite,
+        foreground_masks=foreground_masks,
+        save_background=save_background,
+        mog2_history=mog2_history,
+        mog2_var_threshold=mog2_var_threshold,
+        mog2_downsample_width=mog2_downsample_width,
+        min_bee_area=min_bee_area,
+    )
+
     total_saved = 0
-    for video_path in videos:
-        total_saved += extract_frames(
-            video_path=video_path,
-            output_dir=output_dir,
-            sample_every_seconds=sample_every_seconds,
-            diff_threshold=diff_threshold,
-            min_gap_seconds=min_gap_seconds,
-            max_frames=max_frames_per_video,
-            jpeg_quality=jpeg_quality,
-            skip_start_seconds=skip_start_seconds,
-            overwrite=overwrite,
-            foreground_masks=foreground_masks,
-            save_background=save_background,
-            mog2_history=mog2_history,
-            mog2_var_threshold=mog2_var_threshold,
-            mog2_downsample_width=mog2_downsample_width,
-            min_bee_area=min_bee_area,
-        )
+    if workers <= 1:
+        for video_path in videos:
+            total_saved += extract_frames(video_path=video_path, **worker_kwargs)
+    else:
+        import functools
+        import multiprocessing
+
+        worker_fn = functools.partial(extract_frames, **worker_kwargs)
+        jobs: list[tuple[functools.partial[int], Path]] = [
+            (worker_fn, video_path) for video_path in videos
+        ]
+        with multiprocessing.Pool(workers) as pool:
+            for video_path, saved, error in tqdm(
+                pool.imap_unordered(_safe_extract_video, jobs, chunksize=1),
+                total=len(videos),
+                desc="Extracting",
+                unit="video",
+            ):
+                if error is not None:
+                    click.echo(f"  ! {video_path.name}: {error}")
+                else:
+                    total_saved += saved
 
     click.echo(f"Saved {total_saved} frames from {len(videos)} video(s).")
 

@@ -40,7 +40,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.basedpyright]
 include = ["src", "scripts"]
-exclude = [".venv", "data"]
+exclude = [".venv", "data", "scripts/ls_video_dataset.py"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false

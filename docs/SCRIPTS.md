@@ -57,6 +57,50 @@ Useful options:
 - `--mog2-var-threshold 4.0`: MOG2 variance threshold; lower values make foreground detection more sensitive.
 - `--mog2-downsample-width 320`: run MOG2 on frames downsampled to this width, then resize masks back to the exported frame size. The mask MOG2 sees a Gaussian-blurred downsampled frame; the background MOG2 sees the same downsampled frame *without* the blur so its learned background stays sharp.
 - `--overwrite`: delete existing JPG frames, foreground masks and background.png for a video and regenerate them.
+- `--workers N`: number of worker processes for per-video extraction. `1` (default) keeps the original sequential behavior; `2`–`8` is a good range for a multi-core machine. Per-video failures are caught and logged without aborting the batch, so a single corrupt video won't kill the run.
+
+## `scripts/probe_archive.py`
+
+Downloads a small (default 5) sample of videos spread across the AppMAIS archive and reports per-video size, duration, fps, and frame count, plus aggregate size stats. Useful for estimating disk and time budgets before launching a large download.
+
+```bash
+uv run python scripts/probe_archive.py --count 5
+uv run python scripts/probe_archive.py --count 10 --hives AppMAIS14L AppMAIS10L --probe-days 1
+```
+
+To stay polite to the archive, only the most recent `--probe-days` days per hive are scanned, and a configurable delay is applied between every HTTP request (with exponential backoff on HTTP 429). The script writes probe videos to `--output` (default `data/probe/`) and a JSON report to `data/probe/probe_report.json`.
+
+Useful options:
+
+- `--count N`: number of videos to download (default 5).
+- `--hives H1 H2 ...`: restrict the probe to specific hives; defaults to all 52.
+- `--probe-days N`: only scan the most recent N days per hive (default 7).
+- `--delay SECONDS`: seconds to wait between AppMAIS API requests (default 2.0).
+- `--max-retries N`: retries on HTTP 429 (default 5).
+- `--seed N`: deterministic sample seed (default 0).
+- `--output DIR`: where to write probe videos and the JSON report (default `data/probe`).
+
+## `scripts/build_frame_index.py`
+
+Walks an extracted frames directory (one subdir per video containing `frame_NNNN.jpg` files) and writes three artifacts in the dataset directory:
+
+- `index.jsonl` — one row per saved frame: `{video, frame_path, frame_idx, size_bytes}`.
+- `video_summary.jsonl` — one row per video: `{video, frame_count, total_bytes, first_mtime, last_mtime}`. Videos with zero frames (e.g. no bees found, corrupt file) show up here.
+- `manifest.json` — dataset-level metadata: `{version, created_at, frame_count, video_count, total_bytes, frames_dir, source_videos, git_commit}`.
+
+```bash
+uv run python scripts/build_frame_index.py \\
+    --frames-dir data/dataset_v0/frames \\
+    --source-videos data/videos \\
+    --version v0
+```
+
+Useful options:
+
+- `--frames-dir DIR`: required. Path to the per-video frames directory.
+- `--dataset-dir DIR`: where to write the three artifacts. Defaults to the parent of `--frames-dir`.
+- `--version LABEL`: version label recorded in `manifest.json` (default `v0`).
+- `--source-videos DIR`: optional raw-videos path recorded in the manifest for provenance.
 
 Foreground masks are saved as PNG files with the same stem as each JPG plus `_mask`, for example `frame_000001_t000000.0s_mask.png`. Mask pixels use `0` for background, `127` for shadow, and `255` for foreground. When `--save-background` is also passed, a `background.png` is written to the same video directory at the full frame resolution.
 
