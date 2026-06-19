@@ -34,10 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dinov3_pca_patch_rgb as dpr  # noqa: E402
 
 MODEL_NAME = "vit_small_patch16_dinov3"
-INFERENCE_SIZE = 518  # largest side, DINOv3 small native input
+INFERENCE_SIZE = 640  # longest input side (px); may upscale above native
 INFERENCE_DTYPE = "bfloat16"
 PCA_FIT_FRAMES = 48
-FG_QUANTILE = 0.40  # keep top 60% by 1st-component projection
+FG_QUANTILE = 0.60  # keep top 40% by 1st-component projection
 CLIP_PERCENTILE = 1.0  # clip [1, 99]
 UPSAMPLE_METHOD = "bilinear"
 UPSAMPLE_METHOD_CHOICES = ["nearest", "bilinear", "bicubic", "lanczos4"]
@@ -214,6 +214,24 @@ def render_frame_mask(
     return (fg.reshape(grid_h, grid_w).astype(np.uint8)) * 255
 
 
+def resize_inference(image_bgr: np.ndarray, target_long_side: int) -> np.ndarray:
+    """Resize so the longest side is ``target_long_side`` (up- or down-scale).
+
+    Unlike a downscale-only helper, this can also *upscale* the input so
+    ``--inference-size`` above the native resolution yields a denser patch grid.
+    Uses ``INTER_AREA`` when shrinking and ``INTER_CUBIC`` when enlarging.
+    """
+    height, width = image_bgr.shape[:2]
+    longest = max(height, width)
+    if longest == target_long_side:
+        return image_bgr
+    scale = target_long_side / longest
+    resized_w = max(1, round(width * scale))
+    resized_h = max(1, round(height * scale))
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    return cv2.resize(image_bgr, (resized_w, resized_h), interpolation=interp)
+
+
 def frames_to_patch_tokens(
     frames: list[np.ndarray],
     model: Any,
@@ -226,7 +244,7 @@ def frames_to_patch_tokens(
     tensors: list[torch.Tensor] = []
     padded_sizes: list[tuple[int, int]] = []
     for frame in frames:
-        inference_bgr = dpr.resize_for_inference(frame, inference_size)
+        inference_bgr = resize_inference(frame, inference_size)
         patch_size = dpr.patch_size_for_model(model)
         tensor, padded = dpr.image_to_tensor(inference_bgr, patch_size, device)
         tensors.append(tensor.to(dtype=dtype))
@@ -348,7 +366,11 @@ def read_fit_tokens(
     type=click.IntRange(64),
     default=INFERENCE_SIZE,
     show_default=True,
-    help="Largest input side (px) before DINO inference.",
+    help=(
+        "Longest input side (px) before DINO inference. Above the native "
+        "resolution upscales the frame (denser patch grid, more detail); "
+        "below downscales it."
+    ),
 )
 @click.option(
     "--inference-dtype",
