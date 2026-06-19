@@ -181,3 +181,47 @@ Resume files are stored in the output directory:
 - Partially downloaded files use `.part` and are only renamed to `.mp4` after success.
 
 Use `--hives`, `--start-date`, and `--end-date` to restrict the sample. The script waits between AppMAIS requests by default; use `--delay SECONDS` and `--max-retries N` if the server returns rate-limit errors.
+
+## `scripts/dino_pca_video.py`
+
+Renders a **temporally-coherent** two-stage PCA-RGB video from DINOv3 patch tokens, designed for flicker-free bee clips. It uses a register-equipped model by default (`vit_small_patch16_dinov3`) for clean maps.
+
+The pipeline has two passes:
+
+1. **Fit (once):** sample `--pca-fit-frames` evenly-spaced frames and fit a *frozen* PCA basis:
+   - **Stage A** — PCA over all patch tokens; the 1st component becomes the foreground mask (threshold at `--fg-quantile`).
+   - **Stage B** — PCA over foreground patches only; the top 3 components become the RGB basis.
+   - Each component's sign is fixed (positive skew) and per-component percentile clip anchors (`--clip-percentile`, default 1–99%) are recorded on the fit set.
+2. **Render:** every frame is projected onto that frozen basis → temporally stable colors. Non-foreground patches render black.
+
+```bash
+uv run python scripts/dino_pca_video.py input.mp4 output.mp4
+uv run python scripts/dino_pca_video.py input.mp4 output.mp4 \
+    --side-by-side --mask-video --save-basis basis.npz
+```
+
+Useful options:
+
+- `--model-name vit_small_patch16_dinov3`: timm DINO model. Default has registers (DINOv3 small). Register-equipped variants (DINOv2-reg, DINOv3) give cleaner maps than no-register variants.
+- `--inference-size 518`: largest input side (px) before DINO inference.
+- `--inference-dtype bfloat16`: model/forward dtype. `bfloat16` recommended (DINOv3's rotary embeddings can NaN in plain `float16`).
+- `--pca-fit-frames 48`: number of evenly-spaced frames used to fit the (frozen) PCA basis.
+- `--fg-quantile 0.40`: foreground = top `(1 - q)` of patches by stage-A 1st component (so `0.40` keeps the top 60%).
+- `--clip-percentile 1.0`: per-component percentile clip `[p, 100-p]` before mapping to RGB.
+- `--upsample bilinear`: patch-grid → frame-size interpolation. Choices: `nearest`, `bilinear`, `bicubic`, `lanczos4`.
+- `--batch-size 8`: frames per forward batch.
+- `--side-by-side`: also write `<output>_sidebyside.mp4` (original | PCA).
+- `--mask-video`: also write `<output>_mask.mp4` (binary foreground mask).
+- `--save-basis PATH` / `--load-basis PATH`: save or load the frozen PCA basis as `.npz`.
+- `--max-frames N`: stop after N frames (smoke tests).
+
+### Cross-clip visual comparison
+
+To compare two clips fairly, use the **same** projection for both: fit on one clip and reuse for the other.
+
+```bash
+uv run python scripts/dino_pca_video.py clip_a.mp4 a_pca.mp4 --save-basis a.npz
+uv run python scripts/dino_pca_video.py clip_b.mp4 b_pca.mp4 --load-basis a.npz
+```
+
+The script automatically uses CUDA, then MPS, then CPU. It pads each frame only to the next patch multiple (no square squash), and registers are stripped via `num_prefix_tokens` before the patch grid is formed, so they never appear as spurious grid cells.
