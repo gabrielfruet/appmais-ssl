@@ -37,6 +37,7 @@ MODEL_NAME = "vit_small_patch16_dinov3"
 INFERENCE_SIZE = 1280  # longest input side (px); may upscale above native
 INFERENCE_DTYPE = "bfloat16"
 PCA_FIT_FRAMES = 48
+CLIP_SECONDS = 10.0  # render + fit only the middle N seconds (0 = whole video)
 FG_QUANTILE = 0.60  # keep top 40% by 1st-component projection
 CLIP_PERCENTILE = 1.0  # clip [1, 99]
 UPSAMPLE_METHOD = "bilinear"
@@ -219,7 +220,7 @@ def resize_inference(image_bgr: np.ndarray, target_long_side: int) -> np.ndarray
 
     Unlike a downscale-only helper, this can also *upscale* the input so
     ``--inference-size`` above the native resolution yields a denser patch grid.
-    Uses ``INTER_AREA`` when shrinking and ``INTER_CUBIC`` when enlarging.
+    Uses ``INTER_AREA`` when shrinking and ``INTER_LINEAR`` when enlarging.
     """
     height, width = image_bgr.shape[:2]
     longest = max(height, width)
@@ -228,7 +229,7 @@ def resize_inference(image_bgr: np.ndarray, target_long_side: int) -> np.ndarray
     scale = target_long_side / longest
     resized_w = max(1, round(width * scale))
     resized_h = max(1, round(height * scale))
-    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
     return cv2.resize(image_bgr, (resized_w, resized_h), interpolation=interp)
 
 
@@ -276,10 +277,25 @@ def grid_shape_from_tokens(
     return grid_h, grid_w
 
 
-def sample_fit_frame_indices(total_frames: int, n_fit: int) -> np.ndarray:
-    """Evenly-spaced frame indices for fitting (clamped to total)."""
-    n_fit = min(max(n_fit, 1), total_frames)
-    return np.linspace(0, total_frames - 1, n_fit).round().astype(np.int64)
+def clip_window(total_frames: int, fps: float, clip_seconds: float) -> tuple[int, int]:
+    """Centered [start, end) frame range covering ``clip_seconds`` seconds.
+
+    ``clip_seconds <= 0`` (or unknown length) returns the whole video as
+    ``(0, total_frames)``.
+    """
+    if total_frames <= 0 or clip_seconds <= 0:
+        return 0, total_frames
+    win = min(int(round(clip_seconds * fps)), total_frames)
+    start = max((total_frames - win) // 2, 0)
+    end = min(start + win, total_frames)
+    return start, end
+
+
+def sample_fit_frame_indices(start: int, end: int, n_fit: int) -> np.ndarray:
+    """Evenly-spaced frame indices in [start, end) for fitting."""
+    span = max(end - start, n_fit)
+    n_fit = min(max(n_fit, 1), span)
+    return (start + np.linspace(0, max(span - 1, 0), n_fit)).round().astype(np.int64)
 
 
 def video_props(capture: cv2.VideoCapture) -> tuple[int, int, float, int]:
@@ -313,10 +329,12 @@ def read_fit_tokens(
     if not capture.isOpened():
         raise click.ClickException(f"Could not open input video: {video_path}")
     wanted = set(int(i) for i in fit_indices)
+    idx = min(wanted) if wanted else 0
+    if idx:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, idx)
     tokens_list: list[np.ndarray] = []
     buffer: list[np.ndarray] = []
     pending: list[int] = []
-    idx = 0
     try:
         with tqdm(total=len(wanted), desc="Fit", unit="frame", leave=False) as pbar:
             while wanted:
@@ -437,10 +455,20 @@ def read_fit_tokens(
     help="Load a frozen PCA basis instead of fitting (cross-clip comparability).",
 )
 @click.option(
+    "--clip-seconds",
+    type=click.FloatRange(0.0),
+    default=CLIP_SECONDS,
+    show_default=True,
+    help=(
+        "Render AND fit only the middle N seconds of the video (centered "
+        "window). 0 = whole video."
+    ),
+)
+@click.option(
     "--max-frames",
     type=click.IntRange(1),
     default=None,
-    help="Stop after N frames (smoke tests).",
+    help="Cap the number of rendered frames (within the clip window).",
 )
 def main(
     input_video: Path,
@@ -457,6 +485,7 @@ def main(
     mask_video: bool,
     save_basis: Path | None,
     load_basis: Path | None,
+    clip_seconds: float,
     max_frames: int | None,
 ) -> None:
     if save_basis is not None and load_basis is not None:
@@ -482,11 +511,14 @@ def main(
         raise click.ClickException(f"Could not open input video: {input_video}")
     width, height, fps, total_frames = video_props(cap_probe)
     cap_probe.release()
-    if max_frames is not None:
-        total_frames = min(total_frames, max_frames) if total_frames else max_frames
+    win_start, win_end = clip_window(total_frames, fps, clip_seconds)
+    if max_frames is not None and (win_end - win_start) > max_frames:
+        win_end = win_start + max_frames
+    render_count = max(win_end - win_start, 0)
     click.echo(
-        f"Video: {width}x{height} @ {fps:.2f}fps, "
-        f"{'~' if not total_frames else ''}{total_frames} frames."
+        f"Video: {width}x{height} @ {fps:.2f}fps, {total_frames} frames; "
+        f"window [{win_start}, {win_end}) "
+        f"({render_count if render_count else 'all'} frames)."
     )
 
     upsample_int = upsample_flag(upsample)
@@ -496,9 +528,7 @@ def main(
         click.echo(f"Loading PCA basis from {load_basis}...")
         basis = PcaBasis.load(load_basis)
     else:
-        fit_idx = sample_fit_frame_indices(
-            total_frames if total_frames else pca_fit_frames, pca_fit_frames
-        )
+        fit_idx = sample_fit_frame_indices(win_start, win_end, pca_fit_frames)
         click.echo(f"Fitting PCA basis on {len(fit_idx)} frame(s)...")
         fit_tokens = read_fit_tokens(
             input_video, fit_idx, model, device, inference_size, dtype, batch_size
@@ -516,11 +546,13 @@ def main(
     capture = cv2.VideoCapture(str(input_video))
     if not capture.isOpened():
         raise click.ClickException(f"Could not re-open input video: {input_video}")
+    if win_start:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, win_start)
     frame_idx = 0
     buffer: list[np.ndarray] = []
     try:
-        with tqdm(total=total_frames or None, desc="Render", unit="frame") as pbar:
-            while max_frames is None or frame_idx + len(buffer) < max_frames:
+        with tqdm(total=render_count or None, desc="Render", unit="frame") as pbar:
+            while render_count <= 0 or frame_idx + len(buffer) < render_count:
                 ok, frame = capture.read()
                 if not ok:
                     break

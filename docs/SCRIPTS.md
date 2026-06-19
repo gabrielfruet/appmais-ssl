@@ -184,11 +184,11 @@ Use `--hives`, `--start-date`, and `--end-date` to restrict the sample. The scri
 
 ## `scripts/dino_pca_video.py`
 
-Renders a **temporally-coherent** two-stage PCA-RGB video from DINOv3 patch tokens, designed for flicker-free bee clips. It uses a register-equipped model by default (`vit_small_patch16_dinov3`) for clean maps.
+Renders a **temporally-coherent** two-stage PCA-RGB video from DINOv3 patch tokens, designed for flicker-free bee clips. It uses a register-equipped model by default (`vit_small_patch16_dinov3`) for clean maps. By default it processes only the **middle 10 seconds** of the input (override with `--clip-seconds`, or `--clip-seconds 0` for the whole video).
 
-The pipeline has two passes:
+The pipeline has two passes, both restricted to the clip window:
 
-1. **Fit (once):** sample `--pca-fit-frames` evenly-spaced frames and fit a *frozen* PCA basis:
+1. **Fit (once):** sample `--pca-fit-frames` evenly-spaced frames *within the window* and fit a *frozen* PCA basis:
    - **Stage A** — PCA over all patch tokens; the 1st component becomes the foreground mask (threshold at `--fg-quantile`).
    - **Stage B** — PCA over foreground patches only; the top 3 components become the RGB basis.
    - Each component's sign is fixed (positive skew) and per-component percentile clip anchors (`--clip-percentile`, default 1–99%) are recorded on the fit set.
@@ -203,7 +203,7 @@ uv run python scripts/dino_pca_video.py input.mp4 output.mp4 \
 Useful options:
 
 - `--model-name vit_small_patch16_dinov3`: timm DINO model. Default has registers (DINOv3 small). Register-equipped variants (DINOv2-reg, DINOv3) give cleaner maps than no-register variants.
-- `--inference-size 1280`: longest input side (px), default ~2× the clips' native resolution. Above native it **upscales** the frame for a denser patch grid and more detail; below it downscales. Note: patch count scales quadratically, so 1280 (4800 patches/frame) is ~16× the forward cost of 640px (1200 patches) — a full 72s clip takes ~30 min at ~1 fps on MPS. Use a smaller value for fast iteration.
+- `--inference-size 1280`: longest input side (px), default ~2× the clips' native resolution. Above native it **upscales** the frame (with `INTER_LINEAR`) for a denser patch grid and more detail; below it downscales (with `INTER_AREA`). Patch count scales quadratically: 1280 (4800 patches/frame) is ~16× the forward cost of 640px (1200 patches) — ~1 fps on MPS. The mid-10s default keeps a full run to ~4 min.
 - `--inference-dtype bfloat16`: model/forward dtype. `bfloat16` recommended (DINOv3's rotary embeddings can NaN in plain `float16`).
 - `--pca-fit-frames 48`: number of evenly-spaced frames used to fit the (frozen) PCA basis.
 - `--fg-quantile 0.60`: foreground = top `(1 - q)` of patches by stage-A 1st component (so `0.60` keeps the top 40%).
@@ -213,7 +213,8 @@ Useful options:
 - `--side-by-side`: also write `<output>_sidebyside.mp4` (original | PCA).
 - `--mask-video`: also write `<output>_mask.mp4` (binary foreground mask).
 - `--save-basis PATH` / `--load-basis PATH`: save or load the frozen PCA basis as `.npz`.
-- `--max-frames N`: stop after N frames (smoke tests).
+- `--clip-seconds 10.0`: render AND fit only the middle N seconds of the video (centered window). `0` = whole video.
+- `--max-frames N`: cap the number of rendered frames within the clip window (smoke tests).
 
 ### Cross-clip visual comparison
 
