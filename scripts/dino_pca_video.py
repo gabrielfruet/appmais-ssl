@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dinov3_pca_patch_rgb as dpr  # noqa: E402
 
 MODEL_NAME = "vit_small_patch16_dinov3"
-INFERENCE_SIZE = 640  # longest input side (px); may upscale above native
+INFERENCE_SIZE = 1280  # longest input side (px); may upscale above native
 INFERENCE_DTYPE = "bfloat16"
 PCA_FIT_FRAMES = 48
 FG_QUANTILE = 0.60  # keep top 40% by 1st-component projection

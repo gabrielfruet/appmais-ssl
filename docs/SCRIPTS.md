@@ -203,7 +203,7 @@ uv run python scripts/dino_pca_video.py input.mp4 output.mp4 \
 Useful options:
 
 - `--model-name vit_small_patch16_dinov3`: timm DINO model. Default has registers (DINOv3 small). Register-equipped variants (DINOv2-reg, DINOv3) give cleaner maps than no-register variants.
-- `--inference-size 640`: longest input side (px). Above the native resolution it **upscales** the frame for a denser patch grid and more detail; below it downscales.
+- `--inference-size 1280`: longest input side (px), default ~2× the clips' native resolution. Above native it **upscales** the frame for a denser patch grid and more detail; below it downscales. Note: patch count scales quadratically, so 1280 (4800 patches/frame) is ~16× the forward cost of 640px (1200 patches) — a full 72s clip takes ~30 min at ~1 fps on MPS. Use a smaller value for fast iteration.
 - `--inference-dtype bfloat16`: model/forward dtype. `bfloat16` recommended (DINOv3's rotary embeddings can NaN in plain `float16`).
 - `--pca-fit-frames 48`: number of evenly-spaced frames used to fit the (frozen) PCA basis.
 - `--fg-quantile 0.60`: foreground = top `(1 - q)` of patches by stage-A 1st component (so `0.60` keeps the top 40%).
