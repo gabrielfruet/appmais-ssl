@@ -34,15 +34,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dinov3_pca_patch_rgb as dpr  # noqa: E402
 
 MODEL_NAME = "vit_small_patch16_dinov3"
-INFERENCE_SIZE = 1280  # longest input side (px); may upscale above native
+INFERENCE_SIZE = 1 * 1280  # longest input side (px); may upscale above native
 INFERENCE_DTYPE = "bfloat16"
 PCA_FIT_FRAMES = 48
 CLIP_SECONDS = 10.0  # render + fit only the middle N seconds (0 = whole video)
-FG_QUANTILE = 0.60  # keep top 40% by 1st-component projection
+FG_QUANTILE = 0.90  # keep top 20% by 1st-component projection
 CLIP_PERCENTILE = 1.0  # clip [1, 99]
 UPSAMPLE_METHOD = "bilinear"
 UPSAMPLE_METHOD_CHOICES = ["nearest", "bilinear", "bicubic", "lanczos4"]
 BATCH_SIZE = 8
+
+# --- EUPE (Meta, Efficient Universal Perception Encoder) backend ---
+# Clone: git clone https://github.com/facebookresearch/EUPE.git external/EUPE
+EUPE_REPO_PATH = Path(__file__).resolve().parent.parent / "external" / "EUPE"
+EUPE_ARCH_CHOICES = ["vitt16", "vits16", "vitb16"]
+EUPE_WEIGHTS_URL = {
+    "vitt16": "https://huggingface.co/facebook/EUPE-ViT-T/resolve/main/EUPE-ViT-T.pt",
+    "vits16": "https://huggingface.co/facebook/EUPE-ViT-S/resolve/main/EUPE-ViT-S.pt",
+    "vitb16": "https://huggingface.co/facebook/EUPE-ViT-B/resolve/main/EUPE-ViT-B.pt",
+}
 
 
 class PcaBasis:
@@ -315,6 +325,37 @@ def upsample_flag(name: str) -> int:
     }[name.lower()]
 
 
+def load_eupe_model(arch: str, dtype: torch.dtype, device: torch.device) -> Any:
+    """Load an EUPE ViT (Meta) backbone from a local repo clone + HF weights.
+
+    EUPE ViT is a DINOv3-family model: ``forward_features`` returns the same
+    dict (``x_norm_clstoken`` / ``x_norm_patchtokens``) the rest of this
+    pipeline already consumes, so no other pipeline changes are needed.
+    """
+    if not EUPE_REPO_PATH.is_dir():
+        raise click.ClickException(
+            "EUPE repo not found at "
+            f"{EUPE_REPO_PATH}. Clone it first: "
+            "git clone https://github.com/facebookresearch/EUPE.git "
+            f"{EUPE_REPO_PATH}"
+        )
+    if str(EUPE_REPO_PATH) not in sys.path:
+        sys.path.insert(0, str(EUPE_REPO_PATH))
+    import importlib
+
+    # Imported dynamically: ``external/EUPE`` is an optional local clone
+    # resolved at runtime via sys.path, not a static package dependency.
+    backbones = importlib.import_module("eupe.hub.backbones")
+
+    builders = {
+        "vitt16": backbones.eupe_vitt16,
+        "vits16": backbones.eupe_vits16,
+        "vitb16": backbones.eupe_vitb16,
+    }
+    model = builders[arch](pretrained=True, weights=EUPE_WEIGHTS_URL[arch])
+    return model.to(device=device, dtype=dtype).eval()
+
+
 def read_fit_tokens(
     video_path: Path,
     fit_indices: np.ndarray,
@@ -374,10 +415,27 @@ def read_fit_tokens(
 )
 @click.argument("output_video", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
+    "--backend",
+    type=click.Choice(["dinov3", "eupe"], case_sensitive=False),
+    default="dinov3",
+    show_default=True,
+    help=(
+        "Feature backbone. 'dinov3' loads a timm DINOv3 ViT; 'eupe' loads "
+        "Meta's EUPE ViT (clone at external/EUPE) — same patch-token format."
+    ),
+)
+@click.option(
     "--model-name",
     default=MODEL_NAME,
     show_default=True,
-    help="timm DINO model. Default has registers (DINOv3 small).",
+    help="timm DINO model used with --backend dinov3 (default: DINOv3 small).",
+)
+@click.option(
+    "--eupe-arch",
+    type=click.Choice(EUPE_ARCH_CHOICES, case_sensitive=False),
+    default="vits16",
+    show_default=True,
+    help="EUPE ViT arch used with --backend eupe (vits16 ~ DINOv3 small).",
 )
 @click.option(
     "--inference-size",
@@ -473,7 +531,9 @@ def read_fit_tokens(
 def main(
     input_video: Path,
     output_video: Path,
+    backend: str,
     model_name: str,
+    eupe_arch: str,
     inference_size: int,
     inference_dtype: str,
     pca_fit_frames: int,
@@ -500,11 +560,15 @@ def main(
         "bfloat16": torch.bfloat16,
     }
     dtype = dtype_map[inference_dtype.lower()]
-    click.echo(f"Loading {model_name} on {device} ({inference_dtype})...")
-    model = timm.create_model(model_name, pretrained=True, num_classes=0).to(
-        device=device, dtype=dtype
-    )
-    model.eval()
+    if backend.lower() == "eupe":
+        click.echo(f"Loading EUPE {eupe_arch} on {device} ({inference_dtype})...")
+        model = load_eupe_model(eupe_arch.lower(), dtype, device)
+    else:
+        click.echo(f"Loading {model_name} on {device} ({inference_dtype})...")
+        model = timm.create_model(model_name, pretrained=True, num_classes=0).to(
+            device=device, dtype=dtype
+        )
+        model.eval()
 
     cap_probe = cv2.VideoCapture(str(input_video))
     if not cap_probe.isOpened():

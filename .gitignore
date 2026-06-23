@@ -25,5 +25,8 @@ dist/
 data/
 *.mp4
 
+# Third-party source clones (e.g. EUPE feature backbone)
+external/
+
 # OS/editor
 .DS_Store

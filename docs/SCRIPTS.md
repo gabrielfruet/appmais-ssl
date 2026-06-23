@@ -198,11 +198,19 @@ The pipeline has two passes, both restricted to the clip window:
 uv run python scripts/dino_pca_video.py input.mp4 output.mp4
 uv run python scripts/dino_pca_video.py input.mp4 output.mp4 \
     --side-by-side --mask-video --save-basis basis.npz
+# Render with Meta's EUPE backbone instead of DINOv3 (clone external/EUPE first):
+uv run python scripts/dino_pca_video.py input.mp4 output_eupe.mp4 \
+    --backend eupe --eupe-arch vits16
 ```
 
 Useful options:
 
-- `--model-name vit_small_patch16_dinov3`: timm DINO model. Default has registers (DINOv3 small). Register-equipped variants (DINOv2-reg, DINOv3) give cleaner maps than no-register variants.
+- `--backend [dinov3|eupe]`: feature backbone. `dinov3` (default) loads a timm DINOv3 ViT; `eupe` loads Meta's **EUPE** (Efficient Universal Perception Encoder) ViT, which is a DINOv3-family model with the *same* patch-token format, so the PCA pipeline is unchanged. EUPE requires a local clone:
+  ```bash
+  git clone https://github.com/facebookresearch/EUPE.git external/EUPE
+  ```
+  Weights are downloaded automatically from Hugging Face.
+- `--model-name vit_small_patch16_dinov3`: timm DINO model used with `--backend dinov3`. Default has registers (DINOv3 small). Register-equipped variants give cleaner maps than no-register variants.
 - `--inference-size 1280`: longest input side (px), default ~2× the clips' native resolution. Above native it **upscales** the frame (with `INTER_LINEAR`) for a denser patch grid and more detail; below it downscales (with `INTER_AREA`). Patch count scales quadratically: 1280 (4800 patches/frame) is ~16× the forward cost of 640px (1200 patches) — ~1 fps on MPS. The mid-10s default keeps a full run to ~4 min.
 - `--inference-dtype bfloat16`: model/forward dtype. `bfloat16` recommended (DINOv3's rotary embeddings can NaN in plain `float16`).
 - `--pca-fit-frames 48`: number of evenly-spaced frames used to fit the (frozen) PCA basis.
