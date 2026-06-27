@@ -46,7 +46,6 @@ Implemented in `scripts/seed_detector_class_mapping.py`. Substring match
 | Substring | Target bucket |
 | --- | --- |
 | `drone` | `drone` |
-| `pollen` | `pollen` |
 | `hornet`, `yellowjacket`, `wasp`, `predator`, `intruder`, `foreign`, `enemy` | `enemy` |
 | `worker`, `forager`, `guard`, `fanning`, `bee` | `worker` |
 
@@ -57,23 +56,27 @@ run (recorded by `scripts/seed_detector_audit.py`):
 | --- | ---: | ---: |
 | `drone` | 3 952 | 4.9 % |
 | `worker` | 76 930 | 94.8 % |
-| `pollen` | **0** | 0.0 % |
 | `enemy` | 306 | 0.4 % |
 | **total** | **81 188** | 100 % |
 
+The target schema is intentionally **3 classes** (drone / worker / enemy);
+the pollen bucket was dropped because no source dataset exports pollen
+annotations in COCO today. RF-DETR auto-detects the class count from the
+dataset's `categories` array, so no manual override is needed. See
+`docs/TRAINING.md` for how to re-introduce pollen once a real pollen dataset
+is added.
+
 ## Findings and follow-ups
 
-- **`pollen` bucket is empty.** None of the 10 reachable datasets has pollen
+- **`pollen` is deferred.** None of the 10 reachable datasets has pollen
   annotations in its exported COCO (the dima-unddima project advertises
   `Pollen` at the project level, but v9's exported categories are `B, Bee`
-  only). To seed the pollen detector we need to add another pollen-specific
-  Roboflow dataset — search Roboflow Universe for "pollen" / "pollen basket"
-  / "corbicula", drop the slug into `scripts/seed_detector_datasets.yaml`,
-  re-run the download + merge + audit. Without it, RF-DETR will simply never
-  see a positive pollen example.
+  only). We will train the seed detector 3-class and add a pollen head when
+  real pollen data is available.
 - **Severe class imbalance.** Workers make up 94.8 % of annotations, drones
-  4.9 %, enemies 0.4 %, pollen 0 %. Plan to use a weighted loss, class-aware
-  sampling, or per-class oversampling when training RF-DETR.
+  4.9 %, enemies 0.4 %. Training proceeds as-is for the seed detector; a
+  rebalanced sampler / weighted loss is a follow-up once you have your own
+  labelled data.
 - **`arena-bee` is test-only.** All 86 of its images land in the merged
   `test/` split. RF-DETR only uses `train` + `val`, so this source is unused
   for training; useful for held-out evaluation only.

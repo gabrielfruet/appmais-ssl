@@ -7,12 +7,11 @@ through ``seed_detector_class_mapping.map_class`` and emit one merged
 together with a flat copy of every image (prefixed with the source slug so
 filenames stay unique).
 
-Categories are fixed at the canonical 4 classes with contiguous ids:
+Categories are fixed at the canonical 3 classes with contiguous ids:
 
     0 drone
     1 worker
-    2 pollen
-    3 enemy
+    2 enemy
 
 Anything that doesn't map to a target bucket is dropped (with a warning per
 class so the audit script can flag it). Image and annotation ids are offset

@@ -38,7 +38,6 @@ DEFAULT_OUTPUT = REPO_ROOT / "outputs" / "seed_detector_audit.jpg"
 _BUCKET_COLOURS: dict[str, tuple[int, int, int]] = {
     "drone": (255, 128, 0),
     "worker": (0, 200, 0),
-    "pollen": (0, 200, 255),
     "enemy": (0, 0, 255),
 }
 

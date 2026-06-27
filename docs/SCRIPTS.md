@@ -318,3 +318,23 @@ One-shot helper that prints each `(workspace, project)` pair's class list and av
 ```bash
 uv run python scripts/probe_roboflow_classes.py ufc/workerxdrone bee-wz4v8/bee-detection-er0lm
 ```
+
+## `scripts/train_seed_detector.py`
+
+Thin wrapper around RF-DETR's `model.train()` (https://rfdetr.roboflow.com/latest/learn/train/) that locks in defaults that fit a 12 GB RTX 3060 and the 3-class (drone / worker / enemy) schema. Defaults: `RFDETRSmall` at 512×512, `batch_size=2`, `grad_accum_steps=8`, `gradient_checkpointing=True`, `epochs=30`, early stopping with `patience=10` / `skip_best_epochs=3`. The class count is auto-detected from the merged COCO JSON. See `docs/TRAINING.md` for the rationale behind each default.
+
+```bash
+uv run python scripts/train_seed_detector.py                                 # full default run
+uv run python scripts/train_seed_detector.py --model nano --epochs 1         # smoke test
+uv run python scripts/train_seed_detector.py --resume path/to/checkpoint.pth # resume
+```
+
+## `scripts/predict_seed_detector.py`
+
+Loads a trained checkpoint (default: the most recent `checkpoint_best_total.pth` under `/media/data/seed_detector/checkpoints/`) and runs it over a folder of images. Writes a contact sheet with bounding boxes at `<output-dir>/contact_sheet.jpg` and per-image detections at `<output-dir>/detections.json` (class_id, class_name, score, bbox_xyxy).
+
+```bash
+uv run python scripts/predict_seed_detector.py                                # default: val split
+uv run python scripts/predict_seed_detector.py --checkpoint path/best.pth
+uv run python scripts/predict_seed_detector.py --image-dir /path/to/images --max-images 32
+```
