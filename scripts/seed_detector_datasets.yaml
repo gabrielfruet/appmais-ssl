@@ -1,0 +1,64 @@
+# Source datasets for the seed detector.
+#
+# Each entry is one Roboflow Universe dataset we will merge. The slug is used
+# as a filename prefix in the merged dataset so the source of every image stays
+# traceable. Set ``version: null`` to take the latest public version.
+#
+# `hornet-detection-1wa7m/bee-detection-kx8ggo` from the original list is
+# unreachable with our API key (workspace permissions error) and is skipped —
+# see docs/DATASETS.md for the list of datasets actually used.
+
+- workspace: ufc
+  project: workerxdrone
+  version: 5
+  note: >-
+    WorkerXDrone — already labelled with worker/drone/enemy/dead worker. Has
+    version 5 as latest.
+
+- workspace: datalabeling-yvo8b
+  project: bee-detection-iys4x
+  version: 1
+  note: >-
+    Generic "bee" boxes. Maps to worker via the catch-all 'bee' rule.
+
+- workspace: bee-wz4v8
+  project: bee-detection-er0lm
+  version: 1
+  note: "Already split into Drone/Worker."
+
+- workspace: beecounting
+  project: bee-counting-utltw
+  version: 2
+  note: "Generic bee counting; maps to worker."
+
+- workspace: dima-unddima
+  project: bee-8sqnq
+  version: 9
+  note: "Bee + Pollen pairs on the same frames — useful for the pollen bucket."
+
+- workspace: arena-bee
+  project: arena-bee
+  version: 1
+  note: "Generic bee; maps to worker."
+
+- workspace: james-3iwyb
+  project: bee-counting-gsdmj
+  version: 2
+  note: "Generic bee counting; maps to worker."
+
+- workspace: carls-workspace-m5woj
+  project: bee-project-lj9sk
+  version: 1776862515252
+  note: "Latest is the timestamped version; already split into Drone/Worker."
+
+- workspace: ramans-workspace-njyvf
+  project: bee-fpc1w
+  version: 1
+  note: "Generic bee; maps to worker."
+
+- workspace: project-enurp
+  project: bee-vx7uy
+  version: 2
+  note: >-
+    Behavioural labels (guard, fanning, forager, foreign, bee, queen).
+    'foreign' maps to enemy, the rest map to worker, 'queen' is dropped.

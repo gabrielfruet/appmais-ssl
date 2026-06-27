@@ -278,3 +278,43 @@ uv run python scripts/dino_pca_video.py clip_b.mp4 b_pca.mp4 --load-basis a.npz
 ```
 
 The script automatically uses CUDA, then MPS, then CPU. It pads each frame only to the next patch multiple (no square squash), and registers are stripped via `num_prefix_tokens` before the patch grid is formed, so they never appear as spurious grid cells.
+
+## `scripts/seed_detector_class_mapping.py`
+
+Tiny importable module with the substring-matching rules that map each source Roboflow class to one of the four target buckets (`drone`, `worker`, `pollen`, `enemy`). The canonical target ids are `0..3` in that order. Re-export `map_class(name) -> bucket | None` and `describe_rules()`.
+
+## `scripts/seed_detector_datasets.yaml`
+
+Registry of source Roboflow Universe datasets (`workspace`, `project`, `version`, `note`). Edited by hand when adding or removing datasets; consumed by both the download and merge scripts.
+
+## `scripts/seed_detector_download.py`
+
+Downloads each dataset listed in the registry as COCO via the Roboflow SDK, into `<root>/raw/<workspace>__<project>/<version>/`. Skips datasets that are already present on disk unless `--overwrite` is passed. Reads the API key from `.env`.
+
+```bash
+uv run python scripts/seed_detector_download.py --root /media/data/seed_detector
+```
+
+## `scripts/seed_detector_merge.py`
+
+Reads each downloaded dataset's per-split `_annotations.coco.json`, remaps every annotation's category through `seed_detector_class_mapping.map_class`, copies the kept images (prefixed with the source slug so filenames stay unique), and writes one merged `_annotations.coco.json` per split under `<root>/merged/{train,val,test}/`. Roboflow's `valid` split is renamed to `val` to match the RF-DETR / COCO convention.
+
+```bash
+uv run python scripts/seed_detector_merge.py --root /media/data/seed_detector --overwrite
+```
+
+## `scripts/seed_detector_audit.py`
+
+Prints per-split image / annotation counts, per-class totals, and per-source-dataset counts; with `--contact-sheet` it also writes a tiled overlay image of random training samples to `outputs/seed_detector_audit.jpg` so you can eyeball whether the class mapping is sane before training.
+
+```bash
+uv run python scripts/seed_detector_audit.py --contact-sheet --samples 32
+```
+
+## `scripts/probe_roboflow_classes.py`
+
+One-shot helper that prints each `(workspace, project)` pair's class list and available versions straight from the Roboflow API. Useful for filling in `scripts/seed_detector_datasets.yaml` and confirming a dataset is reachable before downloading. Reads the API key from `.env`.
+
+```bash
+uv run python scripts/probe_roboflow_classes.py ufc/workerxdrone bee-wz4v8/bee-detection-er0lm
+```
