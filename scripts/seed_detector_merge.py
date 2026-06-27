@@ -191,12 +191,28 @@ def main() -> None:
     parser.add_argument("--registry", type=Path, default=DEFAULT_YAML)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument(
-        "--overwrite", action="store_true", help="wipe merged/ before merging"
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="merged dataset output dir (default: <root>/merged)",
+    )
+    parser.add_argument(
+        "--include-slugs",
+        type=str,
+        default=None,
+        help=(
+            "comma-separated list of <workspace>__<project> slugs to keep; "
+            "omit to keep everything in the registry. Useful for fine-tuning "
+            "on a domain-matched subset."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="wipe the output dir before merging"
     )
     args = parser.parse_args()
 
     load_dotenv(REPO_ROOT / ".env")
-    merged_root = args.root / "merged"
+    merged_root = args.output_dir or (args.root / "merged")
     if merged_root.exists() and args.overwrite:
         print(f"[clean] {merged_root}")
         shutil.rmtree(merged_root)
@@ -205,6 +221,12 @@ def main() -> None:
         (merged_root / split_dst).mkdir(exist_ok=True)
 
     entries = _load_registry(args.registry)
+    if args.include_slugs:
+        wanted = {s.strip() for s in args.include_slugs.split(",") if s.strip()}
+        before = len(entries)
+        entries = [e for e in entries if _slug(e["workspace"], e["project"]) in wanted]
+        kept_slugs = sorted(_slug(e["workspace"], e["project"]) for e in entries)
+        print(f"[filter] {len(entries)}/{before} slugs kept: {kept_slugs}")
     stats: list[DatasetStats] = []
 
     image_id_counter = 1

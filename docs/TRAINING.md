@@ -136,6 +136,86 @@ review of enemy predictions regardless.
   ema=0.565). This is the file to point `predict_seed_detector.py`
   and `eval_seed_detector.py` at for inference / eval.
 
+## Round 2 (focused, AppMAIS-only) — 2026-06-27
+
+Round 1 was trained on all 10 ingested sources (7 458 train images).
+A spot-check on the user's own AppMAIS probe video showed that both
+rounds severely under-detect bees on the user's actual hive footage
+(11 detections across 8 frames at threshold 0.5 — most visible
+bees were missed). The hypothesis is **distribution shift**: the
+Roboflow sources have different camera angles, lighting, and bee
+densities than the AppMAIS hive camera footage, and 6 of the 10
+sources are not AppMAIS-style at all.
+
+Round 2 retrains on the 4 AppMAIS-style sources only:
+
+- `ufc__workerxdrone` (453 train + 198 valid)
+- `datalabeling-yvo8b__bee-detection-iys4x` (40 + 6)
+- `bee-wz4v8__bee-detection-er0lm` (321 + 28 + 19)
+- `carls-workspace-m5woj__bee-project-lj9sk` (320 + 29 + 19)
+
+Total: **1 134 train / 261 valid / 38 test = 1 433 imgs**, 24 282
+annotations. Use the new `--include-slugs` flag on
+`seed_detector_merge.py` to reproduce:
+
+```bash
+uv run python scripts/seed_detector_merge.py \
+    --output-dir /media/data/seed_detector/merged_appmais \
+    --include-slugs ufc__workerxdrone,datalabeling-yvo8b__bee-detection-iys4x,bee-wz4v8__bee-detection-er0lm,carls-workspace-m5woj__bee-project-lj9sk \
+    --overwrite
+```
+
+### Results
+
+- **Wall time**: ~33 min on RTX 3060 (1-2 min/epoch on the smaller
+  dataset, much faster than round 1's 10-11 min/epoch).
+- **Epochs completed**: 21/30 — early-stopped.
+- **Best mAP@.50:.95**: **0.562** (overall, slightly lower than
+  round 1's 0.578 — less data hurts slightly).
+
+| Split | AP@.50:.95 | AP@.50 | AP@.75 | drone AP | worker AP | enemy AP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| valid (261 imgs) | **0.558** | 0.895 | 0.641 | 0.654 | 0.385 | 0.415 |
+| test  (38 imgs)  | **0.691** | 0.955 | 0.836 | 0.721 | 0.398 | n/a (no enemy anns in test) |
+
+Worker AP dropped from 0.54 → 0.38 (less data hurts worker
+generalisation); enemy AP improved 0.37 → 0.41; drone AP
+unchanged. Round 2's best checkpoint is at
+`/media/data/seed_detector/checkpoints/small-1782579868/checkpoint_best_total.pth`.
+
+### Distribution shift check (the real test)
+
+Extracted 8 frames from
+`~/dev/pytorch/appmais-ssl/data/probe/AppMAIS14L@2024-04-15@12-50-00.mp4`
+(a real AppMAIS hive-camera clip) and ran both checkpoints with
+threshold 0.5:
+
+| checkpoint | detections | detections / frame |
+| --- | ---: | ---: |
+| round 1 (`small-1782565956`) | 11 | 1.4 |
+| round 2 (`small-1782579868`) | 17 | 2.1 |
+
+Visual inspection of the contact sheets
+(`/media/data/seed_detector/predictions/{round1,round2}_on_appmais/contact_sheet.jpg`)
+shows both rounds **miss the majority of visible bees** in the
+user's footage. Round 2 finds slightly more, but the gap is small
+— the Roboflow-only training data is too distributionally different
+from the user's actual camera setup to produce a useful
+production-quality detector on its own.
+
+### Round 2 verdict
+
+Focused training helps marginally but is **not sufficient**. The
+real fix is round 3: hand-label a few hundred of the user's own
+frames (use round 2's checkpoint as the starting point for
+candidate labelling to speed up the annotation pass), then
+fine-tune from `small-1782579868/checkpoint_best_total.pth` with a
+small LR on the user-labelled subset.
+
+Until round 3 happens, the seed detector should be considered
+**preliminary** — useful for bootstrapping the labelling pass but
+not production-quality.
+
 ### Known caveats
 
 - `skip_best_epochs=3` means runs shorter than 4 epochs will not save
