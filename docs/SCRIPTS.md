@@ -297,7 +297,7 @@ uv run python scripts/seed_detector_download.py --root /media/data/seed_detector
 
 ## `scripts/seed_detector_merge.py`
 
-Reads each downloaded dataset's per-split `_annotations.coco.json`, remaps every annotation's category through `seed_detector_class_mapping.map_class`, copies the kept images (prefixed with the source slug so filenames stay unique), and writes one merged `_annotations.coco.json` per split under `<root>/merged/{train,val,test}/`. Roboflow's `valid` split is renamed to `val` to match the RF-DETR / COCO convention.
+Reads each downloaded dataset's per-split `_annotations.coco.json`, remaps every annotation's category through `seed_detector_class_mapping.map_class`, copies the kept images (prefixed with the source slug so filenames stay unique), and writes one merged `_annotations.coco.json` per split under `<root>/merged/{train,valid,test}/`. The split directory is named `valid/` (not `val/`) because RF-DETR's `rfdetr/datasets/coco.py` hard-codes that path.
 
 ```bash
 uv run python scripts/seed_detector_merge.py --root /media/data/seed_detector --overwrite
@@ -337,4 +337,14 @@ Loads a trained checkpoint (default: the most recent `checkpoint_best_total.pth`
 uv run python scripts/predict_seed_detector.py                                # default: val split
 uv run python scripts/predict_seed_detector.py --checkpoint path/best.pth
 uv run python scripts/predict_seed_detector.py --image-dir /path/to/images --max-images 32
+```
+
+## `scripts/eval_seed_detector.py`
+
+Runs a trained checkpoint over a split (`test/` by default), converts the detections to COCO results format, and evaluates against the split's `_annotations.coco.json` with `pycocotools.cocoeval`. Prints and writes overall + per-class AP@.50:.95, AP@.50, AP@.75 to `<output-dir>/summary_<split>.json`.
+
+```bash
+uv run python scripts/eval_seed_detector.py                       # eval on test/
+uv run python scripts/eval_seed_detector.py --split valid          # eval on val/
+uv run python scripts/eval_seed_detector.py --checkpoint path.pth  # explicit checkpoint
 ```

@@ -53,8 +53,12 @@ def _parse_pairs(args: list[str]) -> list[tuple[str, str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pairs", nargs="+", help="WORKSPACE/PROJECT pairs (use - to read from stdin)")
-    parser.add_argument("--json", action="store_true", help="emit JSON instead of human-readable output")
+    parser.add_argument(
+        "pairs", nargs="+", help="WORKSPACE/PROJECT pairs (use - to read from stdin)"
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="emit JSON instead of human-readable output"
+    )
     args = parser.parse_args()
 
     api_key = _load_api_key()
