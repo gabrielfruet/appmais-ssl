@@ -12,7 +12,7 @@ Loads a checkpoint (default: latest ``checkpoint_best_total.pth`` under
 Usage:
     uv run python scripts/predict_seed_detector.py
     uv run python scripts/predict_seed_detector.py --checkpoint path/to/best.pth
-    uv run python scripts/predict_seed_detector.py --image-dir /media/data/seed_detector/merged/val
+    uv run python scripts/predict_seed_detector.py --image-dir /media/data/seed_detector/merged/valid
 """  # noqa: E501
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def main() -> None:
         "--image-dir",
         type=Path,
         default=None,
-        help="dir of images (default: merged/val)",
+        help="dir of images (default: merged/valid)",
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--threshold", type=float, default=0.4)
@@ -123,7 +123,7 @@ def main() -> None:
     args = parser.parse_args()
 
     ckpt = _resolve_checkpoint(args.checkpoint)
-    image_dir = args.image_dir or Path("/media/data/seed_detector/merged/val")
+    image_dir = args.image_dir or Path("/media/data/seed_detector/merged/valid")
     image_dir = image_dir.expanduser().resolve()
     if not image_dir.is_dir():
         sys.exit(f"--image-dir {image_dir} is not a directory")

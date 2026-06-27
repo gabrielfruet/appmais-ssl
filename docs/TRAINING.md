@@ -73,7 +73,7 @@ uv run python scripts/train_seed_detector.py \
 # 4) Predict on the val split (sanity-check before training on real data)
 uv run python scripts/predict_seed_detector.py \
     --checkpoint /media/data/seed_detector/checkpoints/small-<ts>/checkpoint_best_total.pth \
-    --image-dir /media/data/seed_detector/merged/val \
+    --image-dir /media/data/seed_detector/merged/valid \
     --max-images 32
 ```
 

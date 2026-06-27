@@ -105,7 +105,7 @@ The merged layout is what RF-DETR expects:
   train/
     _annotations.coco.json
     <slug>___<original_filename>.jpg
-  val/
+  valid/
     _annotations.coco.json
     ...
   test/

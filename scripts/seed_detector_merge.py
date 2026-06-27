@@ -15,8 +15,9 @@ Categories are fixed at the canonical 3 classes with contiguous ids:
 
 Anything that doesn't map to a target bucket is dropped (with a warning per
 class so the audit script can flag it). Image and annotation ids are offset
-per source so they stay unique across the merged file. The Roboflow-native
-``valid`` split is renamed to ``val`` to match the RF-DETR / COCO convention.
+per source so they stay unique across the merged file. The output uses the
+``train/``, ``valid/``, ``test/`` directory names — the same layout RF-DETR
+expects (see rfdetr/datasets/coco.py PATHS for the Roboflow-format COCO loader).
 
 Usage:
     uv run python scripts/seed_detector_merge.py
@@ -42,7 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_YAML = REPO_ROOT / "scripts" / "seed_detector_datasets.yaml"
 DEFAULT_ROOT = Path("/media/data/seed_detector")
 
-SPLIT_SRC_TO_DST = {"train": "train", "valid": "val", "test": "test"}
+SPLIT_SRC_TO_DST = {"train": "train", "valid": "valid", "test": "test"}
 
 
 @dataclass

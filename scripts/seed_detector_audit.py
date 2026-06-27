@@ -43,7 +43,7 @@ _BUCKET_COLOURS: dict[str, tuple[int, int, int]] = {
 
 
 def _split_roots(root: Path) -> dict[str, Path]:
-    return {split: root / "merged" / split for split in ("train", "val", "test")}
+    return {split: root / "merged" / split for split in ("train", "valid", "test")}
 
 
 def _slug_of(file_name: str) -> str:
